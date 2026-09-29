@@ -84,14 +84,17 @@ def _map_row_to_instrument(row: dict) -> InstrumentOut:
 @router.get("/", response_model=List[InstrumentOut])
 def list_instruments():
     """
-    Returns instruments from live Supabase database.
+    Returns instruments from live Supabase database with cache synchronization.
     """
     supabase = get_supabase_client()
     if supabase:
         try:
             res = supabase.table("instruments").select("*").order("created_at", desc=True).execute()
-            if res.data:
-                return [_map_row_to_instrument(r) for r in res.data]
+            if res.data is not None:
+                db_insts = [_map_row_to_instrument(r) for r in res.data]
+                _LOCAL_CACHE.clear()
+                _LOCAL_CACHE.extend(db_insts)
+                return db_insts
         except Exception as e:
             print(f"[Supabase] Error listing instruments: {e}")
 
@@ -108,13 +111,19 @@ def get_instrument(instrument_id: str):
         try:
             res = supabase.table("instruments").select("*").eq("id", instrument_id).execute()
             if res.data and len(res.data) > 0:
-                return _map_row_to_instrument(res.data[0])
+                inst = _map_row_to_instrument(res.data[0])
+                if not any(i.id == inst.id for i in _LOCAL_CACHE):
+                    _LOCAL_CACHE.append(inst)
+                return inst
         except Exception as e:
             print(f"[Supabase] Error fetching instrument: {e}")
 
     inst = next((i for i in _LOCAL_CACHE if i.id == instrument_id), None)
     if not inst:
-        raise HTTPException(status_code=404, detail="Instrument not found")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Instrument '{instrument_id}' not found in database. Please register instrument passport first."
+        )
     return inst
 
 

@@ -1,7 +1,7 @@
 import { createBrowserClient, createServerClient } from '@supabase/ssr';
 
-export const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://qfhguwdhjtvkfjidwbvg.supabase.co';
-export const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmaGd1d2RoanR2a2ZqaWR3YnZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAxNjY3NzAsImV4cCI6MjEwNTc0Mjc3MH0.zqGo3HnVjZJxR_oZBwCV_arRc6FmKpJNM56bD-xSESk';
+export const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+export const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
 function decodeJwtPayload(token?: string) {
   if (!token) return null;

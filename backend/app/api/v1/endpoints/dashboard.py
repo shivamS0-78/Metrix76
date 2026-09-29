@@ -31,6 +31,13 @@ def get_dashboard_data(
     pending_approvals = 0
     approved_month = 0
     approved_year = 0
+    total_rejected_all = 0
+    class_counts = {
+        "CLASS_I": {"total": 0, "rejected": 0},
+        "CLASS_II": {"total": 0, "rejected": 0},
+        "CLASS_III": {"total": 0, "rejected": 0},
+        "CLASS_IIII": {"total": 0, "rejected": 0}
+    }
 
     if supabase:
         try:
@@ -94,11 +101,23 @@ def get_dashboard_data(
                     elif rep_status == "APPROVED":
                         approved_month += 1
                         approved_year += 1
+
+                    # Track class totals for rejection rate computation
+                    c_name = inst.get("accuracy_class", "CLASS_III")
+                    if c_name in class_counts:
+                        class_counts[c_name]["total"] += 1
+                        if rep_status == "REJECTED" or r.get("overall_verdict") is False:
+                            class_counts[c_name]["rejected"] += 1
+                            total_rejected_all += 1
         except Exception as e:
             print(f"[Supabase] Error computing dashboard metrics: {e}")
 
-    total_finished = approved_year + len([r for r in technician_work_queue if r.status == ReportStatus.REJECTED])
+    total_finished = approved_year + total_rejected_all
     compliance_rate = round((approved_year / total_finished) * 100, 1) if total_finished > 0 else 100.0
+
+    rejection_rates = {}
+    for c_name, stats in class_counts.items():
+        rejection_rates[c_name] = round((stats["rejected"] / stats["total"]) * 100, 1) if stats["total"] > 0 else 0.0
 
     metrics = DashboardMetrics(
         active_evaluations_count=active_evals,
@@ -106,12 +125,7 @@ def get_dashboard_data(
         completed_approvals_month=approved_month,
         completed_approvals_year=approved_year,
         overall_compliance_rate_pct=compliance_rate,
-        rejection_rate_by_class={
-            "CLASS_I": 0.0,
-            "CLASS_II": 0.0,
-            "CLASS_III": 0.0,
-            "CLASS_IIII": 0.0
-        }
+        rejection_rate_by_class=rejection_rates
     )
 
     return DashboardData(

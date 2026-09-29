@@ -25,11 +25,11 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { name: 'Dashboard', href: '/', tag: 'M0', allowedRoles: ['TECHNICIAN', 'APPROVER', 'ADMIN', null] },
-  { name: 'Standards & Vault', href: '/standards', tag: 'M1', allowedRoles: ['TECHNICIAN', 'APPROVER', 'ADMIN', null] },
-  { name: 'Instruments', href: '/instruments', tag: 'M2', allowedRoles: ['TECHNICIAN', 'ADMIN', 'APPROVER', null] },
-  { name: 'Evaluations', href: '/evaluations', tag: 'M3', allowedRoles: ['TECHNICIAN', 'ADMIN', 'APPROVER', null] },
-  { name: 'Verification', href: '/verification', tag: 'M4', allowedRoles: ['APPROVER', 'ADMIN', 'TECHNICIAN', null] },
-  { name: 'Audit & Seals', href: '/archive', tag: 'M5', allowedRoles: ['TECHNICIAN', 'APPROVER', 'ADMIN', null] },
+  { name: 'Standards & Vault', href: '/standards', tag: 'M1', allowedRoles: ['TECHNICIAN', 'APPROVER', 'ADMIN'] },
+  { name: 'Instruments', href: '/instruments', tag: 'M2', allowedRoles: ['TECHNICIAN', 'APPROVER', 'ADMIN'] },
+  { name: 'Evaluations', href: '/evaluations', tag: 'M3', allowedRoles: ['TECHNICIAN', 'ADMIN'] },
+  { name: 'Verification', href: '/verification', tag: 'M4', allowedRoles: ['APPROVER', 'ADMIN'] },
+  { name: 'Audit & Seals', href: '/archive', tag: 'M5', allowedRoles: ['TECHNICIAN', 'APPROVER', 'ADMIN'] },
 ];
 
 export default function Navbar() {
@@ -86,18 +86,8 @@ export default function Navbar() {
             })}
           </nav>
 
-          {/* Right: Quick Action & Session Switcher */}
+          {/* Right: Session Switcher (Verify button removed) */}
           <div className="flex items-center gap-4">
-            <Link
-              href="/#public-verify"
-              className="hidden sm:flex items-center gap-1.5 text-ink-500 hover:text-ink-950 text-xs uppercase tracking-wider font-semibold py-1.5 px-2 transition-colors"
-            >
-              <Search className="w-3.5 h-3.5" />
-              <span>Verify</span>
-            </Link>
-
-            <div className="h-5 w-[1px] bg-editorial-border hidden sm:block" />
-
             <UserSessionSwitcher />
           </div>
         </div>

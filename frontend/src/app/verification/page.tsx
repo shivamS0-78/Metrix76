@@ -20,8 +20,10 @@ import {
 import { submitVerificationAction, searchArchive, getReportDetail, getReportPdfUrl } from '@/lib/api';
 import { TestReportSummary, TestReportDetail } from '@/types/metrology';
 import { formatDate } from '@/lib/utils';
+import { useAuth } from '@/lib/authContext';
 
 export default function VerificationConsolePage() {
+  const { user, role, loading: authLoading } = useAuth();
   const [allReports, setAllReports] = useState<TestReportSummary[]>([]);
   const [activeFilter, setActiveFilter] = useState<'PENDING' | 'APPROVED' | 'ALL'>('PENDING');
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
@@ -124,6 +126,37 @@ export default function VerificationConsolePage() {
       setSubmittingAction(false);
     }
   };
+
+  if (!authLoading && role === 'TECHNICIAN') {
+    return (
+      <div className="max-w-2xl mx-auto py-24 px-4">
+        <div className="bg-white border border-editorial-border p-8 shadow-editorial text-center space-y-4">
+          <div className="flex items-center justify-between border-b border-editorial-border pb-3">
+            <span className="font-mono text-[10px] text-ink-500 uppercase tracking-widest">
+              ACCESS RESTRICTED // ISO/IEC 17025
+            </span>
+            <span className="text-[10px] font-mono text-rose-600 bg-rose-50 border border-rose-200 px-2 py-0.5">
+              DUAL-CUSTODY VIOLATION
+            </span>
+          </div>
+          <h3 className="font-display font-black text-xl text-ink-950 uppercase tracking-tight">
+            Verification Queue Restricted
+          </h3>
+          <p className="font-mono text-xs text-ink-500 leading-relaxed">
+            Testing Metrologists (TECHNICIAN) are prohibited from accessing verification queues or issuing approvals under statutory dual-custody governance.
+          </p>
+          <div className="pt-4 border-t border-editorial-border flex justify-center gap-3">
+            <Link
+              href="/evaluations"
+              className="bg-ink-950 hover:bg-neutral-800 text-white font-semibold px-4 py-2 text-xs uppercase tracking-wider transition-colors shadow-editorial"
+            >
+              Go to Evaluations Worksheet
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import TopTicker from '@/components/layout/TopTicker';
 import Navbar from '@/components/layout/Navbar';
 import { AuthProvider } from '@/lib/authContext';
 import Link from 'next/link';
@@ -18,25 +19,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body suppressHydrationWarning className="bg-alabaster-100 text-ink-900 min-h-screen antialiased flex flex-col font-sans selection:bg-ink-900 selection:text-white">
         <AuthProvider>
-          {/* Top Ticker / Utility Bar (Inspired by the luxury top bar) */}
-          <div className="bg-[#0A0A0A] text-[#8E8E8E] text-[10px] tracking-[0.2em] uppercase py-2 px-4 sm:px-8 border-b border-neutral-900 flex flex-col sm:flex-row items-center justify-between gap-1 z-50">
-            <div className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="font-mono text-neutral-300">STATUTORY LEGAL METROLOGY LIMS</span>
-              <span className="text-neutral-600 hidden sm:inline">•</span>
-              <span className="hidden sm:inline text-neutral-400">ISO/IEC 17025 ACCREDITED</span>
-              <span className="text-neutral-600 hidden sm:inline">•</span>
-              <span className="hidden sm:inline text-neutral-400">OIML R 76-1:2006</span>
-            </div>
-            <div className="flex items-center gap-4 text-[10px] text-neutral-400 font-mono tracking-widest">
-              <Link href="/standards" className="hover:text-white transition-colors">STANDARDS VAULT</Link>
-              <span className="text-neutral-700">|</span>
-              <Link href="/verification" className="hover:text-white transition-colors">VERIFICATION QUEUE</Link>
-              <span className="text-neutral-700">|</span>
-              <Link href="/archive" className="hover:text-white transition-colors">SEAL REGISTRY</Link>
-            </div>
-          </div>
-
+          <TopTicker />
           <Navbar />
 
           <main className="flex-1 w-full mx-auto">

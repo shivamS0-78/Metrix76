@@ -106,8 +106,11 @@ def list_reference_standards():
     if supabase:
         try:
             res = supabase.table("reference_standards").select("*").order("expiry_date", desc=False).execute()
-            if res.data:
-                return [_map_row_to_standard(r) for r in res.data]
+            if res.data is not None:
+                db_stds = [_map_row_to_standard(r) for r in res.data]
+                _LOCAL_CACHE.clear()
+                _LOCAL_CACHE.extend(db_stds)
+                return db_stds
         except Exception as e:
             print(f"[Supabase] Error listing standards: {e}")
 

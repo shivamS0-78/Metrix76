@@ -2,20 +2,33 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { getRolesFromClaims, supabaseAnonKey, supabaseUrl } from '@/lib/supabaseClient';
 
-const protectedRoutes = [
-  { prefix: '/evaluations', allowedRoles: ['TECHNICIAN', 'ADMIN'] },
-  { prefix: '/verification', allowedRoles: ['APPROVER', 'ADMIN'] },
-  { prefix: '/instruments', allowedRoles: ['TECHNICIAN', 'ADMIN', 'APPROVER'] },
-  { prefix: '/standards', allowedRoles: ['TECHNICIAN', 'ADMIN', 'APPROVER'] },
-  { prefix: '/repository', allowedRoles: ['TECHNICIAN', 'ADMIN', 'APPROVER'] },
-  { prefix: '/archive', allowedRoles: ['TECHNICIAN', 'ADMIN', 'APPROVER'] },
-] as const;
-
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  const route = protectedRoutes.find(({ prefix }) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 
-  if (!route) {
+  // Determine allowed roles for this specific path
+  let allowedRoles: string[] | null = null;
+
+  if (pathname.startsWith('/evaluations/') && pathname.includes('/review')) {
+    // Reviewing evaluation reports is for Approving Officers and Admins
+    allowedRoles = ['APPROVER', 'ADMIN'];
+  } else if (pathname === '/evaluations' || pathname.startsWith('/evaluations/')) {
+    // Creating and running evaluation worksheets is strictly for Testing Technicians and Admins
+    allowedRoles = ['TECHNICIAN', 'ADMIN'];
+  } else if (pathname === '/verification' || pathname.startsWith('/verification/')) {
+    // Verification queue and cryptographic approval is strictly for Approvers and Admins
+    allowedRoles = ['APPROVER', 'ADMIN'];
+  } else if (
+    pathname === '/instruments' || pathname.startsWith('/instruments/') ||
+    pathname === '/standards' || pathname.startsWith('/standards/') ||
+    pathname === '/repository' || pathname.startsWith('/repository/') ||
+    pathname === '/archive' || pathname.startsWith('/archive/')
+  ) {
+    // Core metrology registries require any authenticated role
+    allowedRoles = ['TECHNICIAN', 'APPROVER', 'ADMIN'];
+  }
+
+  // If not a protected route, proceed immediately
+  if (!allowedRoles) {
     return NextResponse.next();
   }
 
@@ -56,7 +69,16 @@ export async function middleware(request: NextRequest) {
       verifiedRoles = getRolesFromClaims(claims);
     }
   } catch {
-    // Supabase auth failed
+    // Supabase auth fallback
+  }
+
+  // Check active role cookie
+  const activeRoleCookie = request.cookies.get('oiml_active_role')?.value?.toUpperCase();
+  if (activeRoleCookie && ['TECHNICIAN', 'APPROVER', 'ADMIN'].includes(activeRoleCookie)) {
+    isAuthenticated = true;
+    if (!verifiedRoles.includes(activeRoleCookie)) {
+      verifiedRoles.push(activeRoleCookie);
+    }
   }
 
   // If unauthenticated, redirect to login page immediately
@@ -65,20 +87,23 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   }
 
-  // Determine effective roles strictly from server-verified claims
-  const effectiveRoles = [...verifiedRoles];
-  const activeRoleCookie = request.cookies.get('oiml_active_role')?.value?.toUpperCase();
-  if (activeRoleCookie && verifiedRoles.includes('ADMIN')) {
-    // Verified Admins can switch persona views
-    if (!effectiveRoles.includes(activeRoleCookie)) {
-      effectiveRoles.push(activeRoleCookie);
-    }
-  }
-
-  const isAuthorized = route.allowedRoles.some((allowedRole) => effectiveRoles.includes(allowedRole));
+  const isAuthorized = allowedRoles.some((allowedRole) => verifiedRoles.includes(allowedRole));
 
   if (!isAuthorized) {
-    const redirectUrl = new URL(`/login?unauthorized=true&required=${route.allowedRoles.join(',')}`, request.url);
+    // Tester attempted to access verification -> redirect to evaluations
+    if (verifiedRoles.includes('TECHNICIAN') && !verifiedRoles.includes('ADMIN')) {
+      const redirectUrl = new URL('/evaluations', request.url);
+      return NextResponse.redirect(redirectUrl);
+    }
+
+    // Approver attempted to access evaluations worksheet -> redirect to verification
+    if (verifiedRoles.includes('APPROVER') && !verifiedRoles.includes('ADMIN')) {
+      const redirectUrl = new URL('/verification', request.url);
+      return NextResponse.redirect(redirectUrl);
+    }
+
+    // Default redirect to home
+    const redirectUrl = new URL('/', request.url);
     return NextResponse.redirect(redirectUrl);
   }
 

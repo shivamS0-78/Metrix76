@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, status
 from datetime import datetime, date, timezone
 from typing import List, Optional, Dict
+from pydantic import BaseModel
 from app.schemas.report import (
     BatchObservationPayload,
     ReportSubmissionResponse,
@@ -15,98 +16,108 @@ from app.schemas.report import (
 )
 from app.schemas.instrument import InstrumentOut
 from app.schemas.reference_standard import ReferenceStandardOut
-from app.schemas.metrology import AccuracyClass, TestDirection, ComplianceVerdict, WeighingEvaluationResult
+from app.schemas.metrology import (
+    AccuracyClass,
+    TestDirection,
+    TestType,
+    ComplianceVerdict,
+    WeighingPointInput,
+    WeighingEvaluationResult,
+    EccentricityPointInput,
+    EccentricityEvaluationResult,
+    RepeatabilitySeriesInput,
+    RepeatabilitySeriesResult,
+    InstrumentMeta,
+)
+from app.services.metrology import (
+    OIMLR76Engine,
+    RepeatabilityEvaluator,
+    EccentricityEvaluator,
+    TareZeroEvaluator,
+)
 from app.core.supabase import get_supabase_client
 from app.api.v1.endpoints.instruments import _LOCAL_CACHE as _LOCAL_INSTRUMENTS, _map_row_to_instrument
 from app.api.v1.endpoints.reference_standards import _LOCAL_CACHE as _LOCAL_STANDARDS, _map_row_to_standard
 
 router = APIRouter()
 
+# Sample fixtures for tests
 _SAMPLE_INST = InstrumentOut(
     id="inst-001",
-    serial_number="SN-TEST-001",
-    model_name="Standard Precision Balance",
-    manufacturer_name="Metrology Dept",
+    serial_number="WB-2026-9941",
+    manufacturer_name="Mettler Toledo",
+    model_name="Precision Pro 15k",
     accuracy_class=AccuracyClass.CLASS_III,
     max_capacity=15.0,
-    min_capacity=0.1,
+    min_capacity=0.04,
     scale_interval_d=0.002,
     verification_interval_e=0.002,
     unit="kg",
     is_multi_interval=False,
+    multi_interval_spec=None,
     load_receptor_type="Platform",
     indicator_make_model="IND-2000",
     year_of_manufacture=2026,
     calculated_n=7500,
     attachments=[],
-    created_at=datetime.now(timezone.utc)
+    created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
 )
 
 _SAMPLE_STD = ReferenceStandardOut(
     id="std-001",
-    set_identifier="STD-SET-01",
-    accuracy_class="E2",
-    certificate_number="CAL-2026-001",
-    calibrated_by="National Metrology Lab",
+    set_identifier="STD-F1-8842",
+    accuracy_class="CLASS_F1",
+    certificate_number="NABL/2026/CAL/9912",
+    calibrated_by="National Physical Laboratory",
     calibration_date=date(2026, 1, 1),
-    expiry_date=date(2027, 1, 1),
+    expiry_date=date(2026, 12, 31),
     expanded_uncertainty_k2=0.0001,
     nominal_range="1 mg to 50 kg",
     is_active=True,
     is_expired=False,
-    days_to_expiry=120,
-    created_at=datetime.now(timezone.utc)
+    days_to_expiry=90,
+    created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
 )
 
-# In-memory fallback
+# In-memory performance cache (Supabase is authoritative persistence)
 _LOCAL_REPORTS: List[TestReportDetail] = []
 _LOCAL_OBSERVATIONS: Dict[str, List[TestObservationRowPayload]] = {}
 
 
 def _get_instrument_helper(instrument_id: str) -> Optional[InstrumentOut]:
+    """Retrieves instrument from Supabase or valid cache. Returns None if not found."""
     supabase = get_supabase_client()
     if supabase:
         try:
             res = supabase.table("instruments").select("*").eq("id", instrument_id).execute()
             if res.data and len(res.data) > 0:
-                return _map_row_to_instrument(res.data[0])
+                inst = _map_row_to_instrument(res.data[0])
+                if not any(i.id == inst.id for i in _LOCAL_INSTRUMENTS):
+                    _LOCAL_INSTRUMENTS.append(inst)
+                return inst
         except Exception as e:
             print(f"[Supabase] Error fetching instrument: {e}")
+
     inst = next((i for i in _LOCAL_INSTRUMENTS if i.id == instrument_id), None)
     if inst:
         return inst
-    if instrument_id in ("inst-001", "default"):
-        return InstrumentOut(
-            id="inst-001",
-            serial_number="SN-TEST-001",
-            model_name="Standard Precision Balance",
-            manufacturer_name="Metrology Dept",
-            accuracy_class=AccuracyClass.CLASS_III,
-            max_capacity=15.0,
-            min_capacity=0.1,
-            scale_interval_d=0.002,
-            verification_interval_e=0.002,
-            unit="kg",
-            is_multi_interval=False,
-            load_receptor_type="Platform",
-            indicator_make_model="IND-2000",
-            year_of_manufacture=2026,
-            calculated_n=7500,
-            attachments=[],
-            created_at=datetime.now(timezone.utc)
-        )
     return None
 
 
 def _get_standard_helper(standard_id: str) -> Optional[ReferenceStandardOut]:
+    """Retrieves reference standard from Supabase or valid cache. Returns None if not found."""
     supabase = get_supabase_client()
     if supabase:
         try:
             res = supabase.table("reference_standards").select("*").eq("id", standard_id).execute()
             if res.data and len(res.data) > 0:
-                return _map_row_to_standard(res.data[0])
+                std = _map_row_to_standard(res.data[0])
+                if not any(s.id == std.id for s in _LOCAL_STANDARDS):
+                    _LOCAL_STANDARDS.append(std)
+                return std
         except Exception as e:
             print(f"[Supabase] Error fetching standard: {e}")
+
     std = next((s for s in _LOCAL_STANDARDS if s.id == standard_id), None)
     if std:
         return std
@@ -149,13 +160,19 @@ def _map_row_to_report_detail(row: dict) -> TestReportDetail:
         verification_interval_e=e_val,
         unit=inst_raw.get("unit", "kg"),
         is_multi_interval=inst_raw.get("is_multi_interval", False),
+        multi_interval_spec=inst_raw.get("multi_interval_spec"),
         load_receptor_type=inst_raw.get("load_receptor_type", "Platform"),
         indicator_make_model=inst_raw.get("indicator_make_model", "IND-2000"),
         year_of_manufacture=inst_raw.get("year_of_manufacture", 2026),
         calculated_n=int(round(max_cap / e_val)) if e_val > 0 else 0,
         attachments=[],
-        created_at=datetime.now(timezone.utc)
+        created_at=datetime.fromisoformat(inst_raw["created_at"].replace("Z", "+00:00")) if "created_at" in inst_raw else datetime.now(timezone.utc)
     )
+
+    exp_date_str = std_raw.get("expiry_date", "2027-01-01")
+    cal_date_str = std_raw.get("calibration_date", "2026-01-01")
+    exp_date = date.fromisoformat(exp_date_str) if isinstance(exp_date_str, str) else exp_date_str
+    cal_date = date.fromisoformat(cal_date_str) if isinstance(cal_date_str, str) else cal_date_str
 
     std_obj = ReferenceStandardOut(
         id=str(std_raw.get("id", "std-001")),
@@ -163,20 +180,27 @@ def _map_row_to_report_detail(row: dict) -> TestReportDetail:
         accuracy_class=std_raw.get("accuracy_class", "E2"),
         certificate_number=std_raw.get("certificate_number", "CAL-2026-001"),
         calibrated_by=std_raw.get("calibrated_by", "National Metrology Lab"),
-        calibration_date=date.fromisoformat(std_raw.get("calibration_date", "2026-01-01")),
-        expiry_date=date.fromisoformat(std_raw.get("expiry_date", "2027-01-01")),
+        calibration_date=cal_date,
+        expiry_date=exp_date,
         expanded_uncertainty_k2=float(std_raw.get("expanded_uncertainty_k2", 0.0001)),
         nominal_range=std_raw.get("nominal_range", "1 mg to 50 kg"),
         is_active=std_raw.get("is_active", True),
-        is_expired=False,
-        days_to_expiry=120,
+        is_expired=exp_date < date.today(),
+        days_to_expiry=(exp_date - date.today()).days,
         created_at=datetime.now(timezone.utc)
     )
 
-    # Observations if present
-    obs_list = []
-    if "test_observations" in row and row["test_observations"]:
-        for o in row["test_observations"]:
+    # Observations grouping
+    obs_list: List[WeighingEvaluationResult] = []
+    ecc_list: List[EccentricityEvaluationResult] = []
+    rep_list: List[RepeatabilitySeriesResult] = []
+
+    raw_obs = row.get("test_observations") or []
+    sorted_obs = sorted(raw_obs, key=lambda x: x.get("sequence_order", 0))
+
+    for o in sorted_obs:
+        tt = o.get("test_type", "WEIGHING")
+        if tt == "WEIGHING":
             obs_list.append(
                 WeighingEvaluationResult(
                     load_applied=float(o.get("load_applied", 0)),
@@ -191,6 +215,18 @@ def _map_row_to_report_detail(row: dict) -> TestReportDetail:
                     direction=TestDirection(o.get("direction", "INCREASING"))
                 )
             )
+        elif tt == "ECCENTRICITY":
+            ecc_list.append(
+                EccentricityEvaluationResult(
+                    position_tag=o.get("position_tag", "CENTER"),
+                    load_applied=float(o.get("load_applied", 0)),
+                    indication_observed=float(o.get("indication_observed", 0)),
+                    calculated_p=float(o.get("calculated_p", 0)),
+                    corrected_error_ec=float(o.get("corrected_error_ec", 0)),
+                    mpe_allowed=float(o.get("mpe_allowed", 0.001)),
+                    is_compliant=bool(o.get("is_compliant", True))
+                )
+            )
 
     return TestReportDetail(
         id=str(row["id"]),
@@ -201,19 +237,19 @@ def _map_row_to_report_detail(row: dict) -> TestReportDetail:
         instrument=inst_obj,
         reference_standard=std_obj,
         environment=EnvironmentalConditions(
-            ambient_temperature_celsius=float(row.get("ambient_temperature_celsius") or 22.0),
-            relative_humidity_pct=float(row.get("relative_humidity_pct") or 50.0),
+            ambient_temperature_celsius=float(row.get("ambient_temperature_celsius") or 22.5),
+            relative_humidity_pct=float(row.get("relative_humidity_pct") or 55.0),
             atmospheric_pressure_hpa=float(row.get("atmospheric_pressure_hpa") or 1013.25)
         ),
-        technical_checklist=TechnicalChecklist(),
+        technical_checklist=TechnicalChecklist(**row.get("technical_checklist", {})) if isinstance(row.get("technical_checklist"), dict) else TechnicalChecklist(),
         overall_verdict=row.get("overall_verdict"),
         rejection_reason=row.get("rejection_reason"),
         sha256_hash=row.get("sha256_hash"),
         pdf_storage_path=row.get("pdf_storage_path"),
         docx_storage_path=row.get("docx_storage_path"),
         weighing_observations=obs_list,
-        repeatability_results=[],
-        eccentricity_results=[],
+        repeatability_results=rep_list,
+        eccentricity_results=ecc_list,
         conducted_by=str(row.get("conducted_by", "Testing Metrologist")),
         approved_by=str(row.get("approved_by")) if row.get("approved_by") else None,
         approved_at=datetime.fromisoformat(row["approved_at"].replace("Z", "+00:00")) if row.get("approved_at") else None,
@@ -226,46 +262,78 @@ def _get_report_or_404(report_id: str) -> TestReportDetail:
     return get_report_detail(report_id)
 
 
+def _generate_database_safe_report_number() -> str:
+    """
+    Generates a unique, database-safe report number formatted as OIML-YYYY-TR-NNNN.
+    Queries the highest existing sequence number for the current year from test_reports.
+    """
+    now = datetime.now(timezone.utc)
+    current_year = now.year
+    prefix = f"OIML-{current_year}-TR-"
+    max_seq = 0
+
+    supabase = get_supabase_client()
+    if supabase:
+        try:
+            res = (
+                supabase.table("test_reports")
+                .select("report_number")
+                .like("report_number", f"{prefix}%")
+                .order("report_number", desc=True)
+                .limit(20)
+                .execute()
+            )
+            if res.data:
+                for row in res.data:
+                    rn = row.get("report_number", "")
+                    if rn.startswith(prefix):
+                        suffix = rn[len(prefix):]
+                        if suffix.isdigit():
+                            max_seq = max(max_seq, int(suffix))
+        except Exception as e:
+            print(f"[Supabase] Error scanning report numbers: {e}")
+
+    for r in _LOCAL_REPORTS:
+        if r.report_number.startswith(prefix):
+            suffix = r.report_number[len(prefix):]
+            if suffix.isdigit():
+                max_seq = max(max_seq, int(suffix))
+
+    next_seq = max_seq + 1
+    return f"{prefix}{next_seq:04d}"
+
+
 @router.post("/draft", response_model=TestReportDetail, status_code=status.HTTP_201_CREATED)
 def create_report_draft(payload: TestReportCreate):
     """
     Creates a new draft evaluation report in the active technician workflow.
+    Validates instrument passport and reference standard, records real environmental inputs.
     """
     instrument = _get_instrument_helper(payload.instrument_id)
     if not instrument:
-        raise HTTPException(status_code=404, detail="Instrument not found")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Instrument '{payload.instrument_id}' not found in database. Please register instrument passport first."
+        )
 
     standard = _get_standard_helper(payload.reference_standard_id)
     if not standard:
-        raise HTTPException(status_code=404, detail="Reference standard not found")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reference standard '{payload.reference_standard_id}' not found in database."
+        )
 
     if not standard.is_active or standard.expiry_date < date.today():
-        raise HTTPException(status_code=422, detail="Selected reference standard is expired or inactive")
+        raise HTTPException(status_code=422, detail="Selected reference standard is expired or inactive (ISO 17025 guardrail)")
 
     now = datetime.now(timezone.utc)
+    report_num = _generate_database_safe_report_number()
     supabase = get_supabase_client()
-    seq_num = len(_LOCAL_REPORTS) + 1
+
     if supabase:
         try:
-            count_res = supabase.table("test_reports").select("id", count="exact").execute()
-            if count_res.count is not None:
-                seq_num = count_res.count + 1
-        except Exception:
-            pass
-    report_num = f"OIML-{now.year}-TR-{seq_num:04d}"
-    if supabase:
-        try:
-            # Resolve active user ID for foreign key constraint
-            conducted_by_id = "5ec3c7f8-9d47-4024-9898-a4bbb4db1701"
-            if payload.conducted_by:
-                conducted_by_id = payload.conducted_by
-            else:
-                try:
-                    users_res = supabase.auth.admin.list_users()
-                    if users_res and len(users_res) > 0:
-                        conducted_by_id = str(users_res[0].id)
-                except Exception:
-                    pass
+            # Resolve user ID for foreign key constraint
+            conducted_by_id = payload.conducted_by or "5ec3c7f8-9d47-4024-9898-a4bbb4db1701"
 
             insert_data = {
                 "report_number": report_num,
@@ -276,17 +344,22 @@ def create_report_draft(payload: TestReportCreate):
                 "standard_version": "OIML R 76-1:2006",
                 "ambient_temperature_celsius": payload.ambient_temperature_celsius,
                 "relative_humidity_pct": payload.relative_humidity_pct,
-                "atmospheric_pressure_hpa": payload.atmospheric_pressure_hpa,
+                "atmospheric_pressure_hpa": payload.atmospheric_pressure_hpa or 1013.25,
                 "technical_checklist": payload.technical_checklist.model_dump() if payload.technical_checklist else {},
                 "conducted_by": conducted_by_id,
             }
             res = supabase.table("test_reports").insert(insert_data).execute()
             if res.data and len(res.data) > 0:
                 new_row = res.data[0]
-                return get_report_detail(new_row["id"])
+                persisted_report = get_report_detail(new_row["id"])
+                # Update in-memory cache
+                if not any(r.id == persisted_report.id for r in _LOCAL_REPORTS):
+                    _LOCAL_REPORTS.append(persisted_report)
+                return persisted_report
         except Exception as e:
             print(f"[Supabase] Error creating report draft: {e}")
 
+    # In-memory fallback
     report_id = f"rep-{len(_LOCAL_REPORTS) + 101:03d}"
     draft = TestReportDetail(
         id=report_id,
@@ -299,7 +372,7 @@ def create_report_draft(payload: TestReportCreate):
         environment=EnvironmentalConditions(
             ambient_temperature_celsius=payload.ambient_temperature_celsius,
             relative_humidity_pct=payload.relative_humidity_pct,
-            atmospheric_pressure_hpa=payload.atmospheric_pressure_hpa,
+            atmospheric_pressure_hpa=payload.atmospheric_pressure_hpa or 1013.25,
         ),
         technical_checklist=payload.technical_checklist or TechnicalChecklist(),
         overall_verdict=None,
@@ -310,7 +383,7 @@ def create_report_draft(payload: TestReportCreate):
         weighing_observations=[],
         repeatability_results=[],
         eccentricity_results=[],
-        conducted_by="Technician Draft",
+        conducted_by=payload.conducted_by or "Technician Draft",
         approved_by=None,
         approved_at=None,
         created_at=now,
@@ -324,63 +397,222 @@ def create_report_draft(payload: TestReportCreate):
 @router.put("/{report_id}/observations")
 def upsert_report_observations(report_id: str, payload: BatchObservationPayload):
     """
-    Batch-upsert test rows for a draft or in-progress report.
+    Authoritative Observation Upsert Engine:
+    Recalculates all test points through OIMLR76Engine using the real instrument configuration:
+    - Weighing performance (Clause A.4.4): P, E, E0 turning point, Ec, statutory MPE, compliance
+    - Eccentricity (Clause A.4.7): center baseline E0, corner deviations Ec, statutory MPE
+    - Repeatability (Clause A.4.10): series spread delta_i, standard deviation s, statutory MPE
+    - Tare / Zero (Clauses A.4.2 & A.4.6): zero setting error against 0.25e, tare error
+    Updates overall compliance verdict in Supabase test_reports.
     """
     rep = _get_report_or_404(report_id)
-    if payload.report_id != report_id:
-        raise HTTPException(status_code=400, detail="Observation payload report_id must match the route report_id")
+    if not rep.instrument:
+        raise HTTPException(status_code=422, detail="Report does not have an associated instrument passport")
 
+    inst = rep.instrument
+    spec = InstrumentMeta(
+        accuracy_class=inst.accuracy_class,
+        max_capacity=inst.max_capacity,
+        min_capacity=inst.min_capacity,
+        scale_interval_d=inst.scale_interval_d,
+        verification_interval_e=inst.verification_interval_e,
+        unit=inst.unit or "kg",
+        is_multi_interval=inst.is_multi_interval,
+        multi_interval_ranges=inst.multi_interval_spec
+    )
+    e = spec.verification_interval_e
+
+    # Group incoming observations by test_type
+    weighing_obs = [
+        o for o in payload.observations
+        if (o.test_type.value if hasattr(o.test_type, "value") else str(o.test_type)) == "WEIGHING"
+    ]
+    ecc_obs = [
+        o for o in payload.observations
+        if (o.test_type.value if hasattr(o.test_type, "value") else str(o.test_type)) == "ECCENTRICITY"
+    ]
+    rep_obs = [
+        o for o in payload.observations
+        if (o.test_type.value if hasattr(o.test_type, "value") else str(o.test_type)) == "REPEATABILITY"
+    ]
+    tare_zero_obs = [
+        o for o in payload.observations
+        if (o.test_type.value if hasattr(o.test_type, "value") else str(o.test_type)) == "TARE_ZERO"
+    ]
+
+    obs_rows = []
+
+    # 1. Authoritative Weighing Performance Calculation (Clause A.4.4)
+    if weighing_obs:
+        weigh_inputs = [
+            WeighingPointInput(
+                load_applied=o.load_applied,
+                indication_observed=o.indication_observed,
+                delta_load=o.delta_load,
+                direction=o.direction
+            )
+            for o in weighing_obs
+        ]
+        weigh_res = OIMLR76Engine.evaluate_weighing_batch(spec, weigh_inputs)
+        for o, res in zip(weighing_obs, weigh_res.results):
+            obs_rows.append({
+                "report_id": report_id,
+                "test_type": "WEIGHING",
+                "direction": o.direction.value if hasattr(o.direction, "value") else str(o.direction),
+                "sequence_order": o.sequence_order,
+                "load_applied": res.load_applied,
+                "indication_observed": res.indication_observed,
+                "delta_load": res.delta_load,
+                "calculated_p": res.calculated_p,
+                "error_e": res.true_error_e,
+                "corrected_error_ec": res.corrected_error_ec,
+                "mpe_allowed": res.mpe_allowed,
+                "is_compliant": res.is_compliant,
+                "position_tag": o.position_tag or "CENTER",
+                "run_cycle": o.run_cycle or 1
+            })
+
+    # 2. Authoritative Eccentricity Calculation (Clause A.4.7)
+    if ecc_obs:
+        ecc_inputs = [
+            EccentricityPointInput(
+                position_tag=o.position_tag or "CENTER",
+                load_applied=o.load_applied,
+                indication_observed=o.indication_observed,
+                delta_load=o.delta_load
+            )
+            for o in ecc_obs
+        ]
+        ecc_res = OIMLR76Engine.evaluate_eccentricity_batch(spec, ecc_inputs)
+        for o, res in zip(ecc_obs, ecc_res.results):
+            p = res.calculated_p
+            err_e = round((o.indication_observed + 0.5 * e - o.delta_load) - o.load_applied, 5)
+            obs_rows.append({
+                "report_id": report_id,
+                "test_type": "ECCENTRICITY",
+                "direction": "STATIC",
+                "sequence_order": o.sequence_order,
+                "load_applied": res.load_applied,
+                "indication_observed": res.indication_observed,
+                "delta_load": o.delta_load,
+                "calculated_p": p,
+                "error_e": err_e,
+                "corrected_error_ec": res.corrected_error_ec,
+                "mpe_allowed": res.mpe_allowed,
+                "is_compliant": res.is_compliant,
+                "position_tag": res.position_tag,
+                "run_cycle": o.run_cycle or 1
+            })
+
+    # 3. Authoritative Repeatability Calculation (Clause A.4.10)
+    if rep_obs:
+        cycles: Dict[int, List[TestObservationRowPayload]] = {}
+        for o in rep_obs:
+            c = o.run_cycle or 1
+            cycles.setdefault(c, []).append(o)
+
+        for c_idx, c_obs in cycles.items():
+            nominal_load = c_obs[0].load_applied if c_obs else 0.0
+            pts = [
+                WeighingPointInput(
+                    load_applied=o.load_applied,
+                    indication_observed=o.indication_observed,
+                    delta_load=o.delta_load,
+                    direction=o.direction
+                )
+                for o in c_obs
+            ]
+            series = [RepeatabilitySeriesInput(nominal_load=nominal_load, observations=pts)]
+            rep_res = OIMLR76Engine.evaluate_repeatability_batch(spec, series)
+            series_comp = rep_res.overall_compliant
+            series_mpe = rep_res.series_results[0].mpe_allowed if rep_res.series_results else OIMLR76Engine.get_mpe(nominal_load, spec)
+
+            for o in c_obs:
+                p = round(o.indication_observed + 0.5 * e - o.delta_load, 5)
+                err_e = round(p - o.load_applied, 5)
+                obs_rows.append({
+                    "report_id": report_id,
+                    "test_type": "REPEATABILITY",
+                    "direction": "STATIC",
+                    "sequence_order": o.sequence_order,
+                    "load_applied": o.load_applied,
+                    "indication_observed": o.indication_observed,
+                    "delta_load": o.delta_load,
+                    "calculated_p": p,
+                    "error_e": err_e,
+                    "corrected_error_ec": err_e,
+                    "mpe_allowed": series_mpe,
+                    "is_compliant": series_comp,
+                    "position_tag": o.position_tag or "CENTER",
+                    "run_cycle": c_idx
+                })
+
+    # 4. Authoritative Tare / Zero Calculation (Clauses A.4.2 & A.4.6)
+    if tare_zero_obs:
+        zero_limit = round(0.25 * e, 5)
+        for o in tare_zero_obs:
+            p = round(o.indication_observed + 0.5 * e - o.delta_load, 5)
+            err_e = round(p - o.load_applied, 5)
+            mpe = OIMLR76Engine.get_mpe(o.load_applied, spec) if o.load_applied > 0 else zero_limit
+            is_comp = abs(err_e) <= (mpe + 1e-9)
+            obs_rows.append({
+                "report_id": report_id,
+                "test_type": "TARE_ZERO",
+                "direction": "STATIC",
+                "sequence_order": o.sequence_order,
+                "load_applied": o.load_applied,
+                "indication_observed": o.indication_observed,
+                "delta_load": o.delta_load,
+                "calculated_p": p,
+                "error_e": err_e,
+                "corrected_error_ec": err_e,
+                "mpe_allowed": mpe,
+                "is_compliant": is_comp,
+                "position_tag": o.position_tag or "ZERO_SETTING",
+                "run_cycle": o.run_cycle or 1
+            })
+
+    # Calculate overall compliance verdict across all test points
+    overall_verdict = all(row["is_compliant"] for row in obs_rows) if obs_rows else True
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Persist authoritative results to Supabase
     supabase = get_supabase_client()
     if supabase:
         try:
-            obs_rows = []
-            for obs in payload.observations:
-                obs_rows.append({
-                    "report_id": report_id,
-                    "test_type": obs.test_type.value if hasattr(obs.test_type, "value") else str(obs.test_type),
-                    "direction": obs.direction.value if hasattr(obs.direction, "value") else str(obs.direction),
-                    "sequence_order": obs.sequence_order,
-                    "load_applied": obs.load_applied,
-                    "indication_observed": obs.indication_observed,
-                    "delta_load": obs.delta_load,
-                    "calculated_p": obs.indication_observed + 0.5 * 0.002 - obs.delta_load,
-                    "error_e": (obs.indication_observed + 0.5 * 0.002 - obs.delta_load) - obs.load_applied,
-                    "corrected_error_ec": (obs.indication_observed + 0.5 * 0.002 - obs.delta_load) - obs.load_applied,
-                    "mpe_allowed": 0.001,
-                    "is_compliant": True,
-                    "position_tag": obs.position_tag or "CENTER",
-                    "run_cycle": obs.run_cycle or 1
-                })
-            supabase.table("test_observations").upsert(obs_rows).execute()
+            # Delete existing observations for this report to maintain clean sequence ordering
+            supabase.table("test_observations").delete().eq("report_id", report_id).execute()
+            if obs_rows:
+                supabase.table("test_observations").insert(obs_rows).execute()
+            supabase.table("test_reports").update({
+                "overall_verdict": overall_verdict,
+                "updated_at": now_iso
+            }).eq("id", report_id).execute()
         except Exception as e:
-            print(f"[Supabase] Error upserting observations: {e}")
+            print(f"[Supabase] Error persisting observations: {e}")
 
-    merged = {(
-        obs.test_type.value if hasattr(obs.test_type, "value") else str(obs.test_type),
-        obs.direction.value if hasattr(obs.direction, "value") else str(obs.direction),
-        obs.sequence_order,
-        obs.position_tag or "",
-        obs.run_cycle or 0,
-    ): obs for obs in _LOCAL_OBSERVATIONS.get(report_id, [])}
-
-    for obs in payload.observations:
-        merged[(
-            obs.test_type.value if hasattr(obs.test_type, "value") else str(obs.test_type),
-            obs.direction.value if hasattr(obs.direction, "value") else str(obs.direction),
-            obs.sequence_order,
-            obs.position_tag or "",
-            obs.run_cycle or 0,
-        )] = obs
-
-    _LOCAL_OBSERVATIONS[report_id] = list(merged.values())
+    # Update in-memory caches
+    _LOCAL_OBSERVATIONS[report_id] = payload.observations
+    if weighing_obs and 'weigh_res' in locals():
+        rep.weighing_observations = weigh_res.results
+    if ecc_obs and 'ecc_res' in locals():
+        rep.eccentricity_results = ecc_res.results
+    rep.overall_verdict = overall_verdict
     rep.updated_at = datetime.now(timezone.utc)
-    return {"report_id": report_id, "observations": _LOCAL_OBSERVATIONS[report_id]}
+
+    return {
+        "report_id": report_id,
+        "overall_verdict": overall_verdict,
+        "observations": payload.observations,
+        "observations_count": len(obs_rows),
+        "all_compliant": overall_verdict
+    }
 
 
 def _validate_observations_completeness(observations: List[TestObservationRowPayload]) -> None:
     """
-    Validates that the observation payload contains the required test measurement groups
-    and complete test data according to OIML R 76 requirements.
+    Validates that the observation payload contains the mandatory test measurements
+    conforming to OIML R 76 requirements.
     """
     grouped_by_type: Dict[str, List[TestObservationRowPayload]] = {}
     for obs in observations:
@@ -401,7 +633,6 @@ def _validate_observations_completeness(observations: List[TestObservationRowPay
             detail=f"Submission rejected: Weighing performance test requires at least 5 observation points across the range, found {len(weighing_obs)}.",
         )
 
-    # Validate that increasing and decreasing directions or zero baseline exist
     directions = {obs.direction.value if hasattr(obs.direction, "value") else str(obs.direction) for obs in weighing_obs}
     has_increasing = "INCREASING" in directions
     has_zero_or_preload = any(abs(obs.load_applied) < 1e-7 for obs in weighing_obs)
@@ -411,44 +642,12 @@ def _validate_observations_completeness(observations: List[TestObservationRowPay
             detail="Submission rejected: Weighing performance test must include a zero-load point (L=0) and INCREASING direction observations.",
         )
 
-    # 2. Check completeness for additional present test groups
-    ecc_obs = grouped_by_type.get("ECCENTRICITY", [])
-    if ecc_obs:
-        if len(ecc_obs) < 4:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Submission rejected: Eccentricity test (Clause A.4.7) requires at least 4 test positions, found {len(ecc_obs)}.",
-            )
-        positions = {(obs.position_tag or "").upper() for obs in ecc_obs}
-        if not ("CENTER" in positions or "POSITION_1" in positions or len(positions) >= 4):
-            raise HTTPException(
-                status_code=422,
-                detail="Submission rejected: Eccentricity test must include distinct receptor positions (including center).",
-            )
-
-    rep_obs = grouped_by_type.get("REPEATABILITY", [])
-    if rep_obs:
-        if len(rep_obs) < 3:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Submission rejected: Repeatability test (Clause A.4.10) requires at least 3 repeat measurements per series, found {len(rep_obs)} total.",
-            )
-
-    tare_obs = grouped_by_type.get("TARE_ZERO", [])
-    if tare_obs:
-        if len(tare_obs) < 1:
-            raise HTTPException(
-                status_code=422,
-                detail="Submission rejected: Tare/Zero test requires at least one operative verification record.",
-            )
-
 
 @router.post("/{report_id}/submit", response_model=ReportSubmissionResponse)
 def submit_report(report_id: str):
     """
-    Validates mandatory report data, reference standard validity, environmental conditions,
-    and observation completeness across measurement groups, then transitions the report
-    to the PENDING_APPROVAL review queue.
+    Validates report data, reference standard validity, environmental conditions,
+    and observation completeness, then transitions the report to PENDING_APPROVAL.
     """
     rep = _get_report_or_404(report_id)
 
@@ -482,41 +681,41 @@ def submit_report(report_id: str):
                 detail=f"Submission rejected: Relative humidity ({rh}%) is outside acceptable range (10% - 90%).",
             )
 
-    # Validate Observation Completeness across measurement groups
+    # Validate Observation Completeness
     observations = _LOCAL_OBSERVATIONS.get(report_id, [])
-    if not observations:
-        supabase = get_supabase_client()
-        if supabase:
-            try:
-                res = supabase.table("test_observations").select("*").eq("report_id", report_id).execute()
-                if res.data:
-                    observations = [
-                        TestObservationRowPayload(
-                            test_type=r.get("test_type", "WEIGHING"),
-                            direction=r.get("direction", "INCREASING"),
-                            sequence_order=r.get("sequence_order", 1),
-                            load_applied=float(r.get("load_applied", 0)),
-                            indication_observed=float(r.get("indication_observed", 0)),
-                            delta_load=float(r.get("delta_load", 0)),
-                            position_tag=r.get("position_tag", "CENTER"),
-                            run_cycle=r.get("run_cycle", 1)
-                        )
-                        for r in res.data
-                    ]
-            except Exception as e:
-                print(f"[Supabase] Error fetching observations: {e}")
+    supabase = get_supabase_client()
+    if not observations and supabase:
+        try:
+            res = supabase.table("test_observations").select("*").eq("report_id", report_id).execute()
+            if res.data:
+                observations = [
+                    TestObservationRowPayload(
+                        test_type=r.get("test_type", "WEIGHING"),
+                        direction=r.get("direction", "INCREASING"),
+                        sequence_order=r.get("sequence_order", 1),
+                        load_applied=float(r.get("load_applied", 0)),
+                        indication_observed=float(r.get("indication_observed", 0)),
+                        delta_load=float(r.get("delta_load", 0)),
+                        position_tag=r.get("position_tag", "CENTER"),
+                        run_cycle=r.get("run_cycle", 1)
+                    )
+                    for r in res.data
+                ]
+        except Exception as e:
+            print(f"[Supabase] Error fetching observations: {e}")
 
     if not observations:
         raise HTTPException(status_code=422, detail="Submission rejected: No test observations recorded for this report")
 
     _validate_observations_completeness(observations)
 
-    supabase = get_supabase_client()
+    # Transition to PENDING_APPROVAL in Supabase
+    now_iso = datetime.now(timezone.utc).isoformat()
     if supabase:
         try:
             supabase.table("test_reports").update({
                 "status": "PENDING_APPROVAL",
-                "updated_at": datetime.now(timezone.utc).isoformat()
+                "updated_at": now_iso
             }).eq("id", report_id).execute()
         except Exception as e:
             print(f"[Supabase] Error submitting report: {e}")
@@ -530,6 +729,46 @@ def submit_report(report_id: str):
     )
 
 
+class ReportRejectPayload(BaseModel):
+    reason: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+@router.post("/{report_id}/reject")
+def reject_report(report_id: str, payload: Optional[ReportRejectPayload] = None):
+    """
+    Formally records report rejection with mandatory reason and transitions status to REJECTED.
+    """
+    rep = _get_report_or_404(report_id)
+    reason = (payload.reason or payload.remarks or "Rejected during verification inspection").strip() if payload else "Rejected during verification inspection"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    supabase = get_supabase_client()
+    if supabase:
+        try:
+            supabase.table("test_reports").update({
+                "status": "REJECTED",
+                "rejection_reason": reason,
+                "overall_verdict": False,
+                "updated_at": now_iso
+            }).eq("id", report_id).execute()
+        except Exception as e:
+            print(f"[Supabase] Error rejecting report: {e}")
+
+    rep.status = ReportStatus.REJECTED
+    rep.rejection_reason = reason
+    rep.overall_verdict = False
+    rep.updated_at = datetime.now(timezone.utc)
+
+    return {
+        "report_id": report_id,
+        "status": ReportStatus.REJECTED,
+        "rejection_reason": reason,
+        "returned_to_queue": True,
+        "message": "Report rejected and returned to queue."
+    }
+
+
+
 @router.get("/archive", response_model=List[TestReportSummary])
 def search_archive(
     query: Optional[str] = Query(None, description="Free text search: Serial, Model, Manufacturer, Report #"),
@@ -541,6 +780,7 @@ def search_archive(
 ):
     """
     Module 6: Faceted search and filter engine for reports with multi-tenant user scoping.
+    Queries live Supabase database as the authoritative source of truth.
     """
     supabase = get_supabase_client()
     if supabase:
@@ -619,14 +859,26 @@ def search_archive(
 @router.get("/{report_id}", response_model=TestReportDetail)
 def get_report_detail(report_id: str):
     """
-    Retrieves full test report record from Supabase.
+    Retrieves full test report record with observations and instrument from Supabase.
     """
     supabase = get_supabase_client()
     if supabase:
         try:
-            res = supabase.table("test_reports").select("*, instruments(*), reference_standards(*), test_observations(*)").eq("id", report_id).execute()
+            res = (
+                supabase.table("test_reports")
+                .select("*, instruments(*), reference_standards(*), test_observations(*)")
+                .eq("id", report_id)
+                .execute()
+            )
             if res.data and len(res.data) > 0:
-                return _map_row_to_report_detail(res.data[0])
+                report_detail = _map_row_to_report_detail(res.data[0])
+                # Update in-memory cache
+                existing_idx = next((i for i, r in enumerate(_LOCAL_REPORTS) if r.id == report_id), None)
+                if existing_idx is not None:
+                    _LOCAL_REPORTS[existing_idx] = report_detail
+                else:
+                    _LOCAL_REPORTS.append(report_detail)
+                return report_detail
         except Exception as e:
             print(f"[Supabase] Error fetching report: {e}")
 
@@ -681,7 +933,7 @@ def public_verify_report(report_id: str):
         manufacturer_name=rep.instrument.manufacturer_name,
         model_name=rep.instrument.model_name,
         accuracy_class=rep.instrument.accuracy_class.value,
-        overall_verdict=rep.overall_verdict or True,
+        overall_verdict=rep.overall_verdict if rep.overall_verdict is not None else True,
         approved_at=rep.approved_at,
         sha256_hash=rep.sha256_hash or "e3b0c44298fc1c149afbf4c8996fb924",
         verified_at=datetime.now(timezone.utc)

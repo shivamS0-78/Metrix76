@@ -18,7 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Root level healthcheck
+# Root level healthcheck & live status
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "oiml-r76-fastapi", "version": "1.0.0"}

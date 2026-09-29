@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 import {
   Layers,
   CheckCircle2,
@@ -145,7 +146,7 @@ const evaluateRepeatabilitySeries = (series: RepeatabilitySeriesState, instrumen
 };
 
 export default function EvaluationsPage() {
-  const { user } = useAuth();
+  const { user, role, loading: authLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<WorksheetTab>('A_WEIGHING');
   const inputRefs = useRef<Record<string, HTMLInputElement | HTMLSelectElement | null>>({});
 
@@ -1334,6 +1335,37 @@ export default function EvaluationsPage() {
 
     return null;
   };
+
+  if (!authLoading && role === 'APPROVER') {
+    return (
+      <div className="max-w-2xl mx-auto py-24 px-4">
+        <div className="bg-white border border-editorial-border p-8 shadow-editorial text-center space-y-4">
+          <div className="flex items-center justify-between border-b border-editorial-border pb-3">
+            <span className="font-mono text-[10px] text-ink-500 uppercase tracking-widest">
+              ACCESS RESTRICTED // APPROVING OFFICER
+            </span>
+            <span className="text-[10px] font-mono text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5">
+              SEPARATION OF DUTIES
+            </span>
+          </div>
+          <h3 className="font-display font-black text-xl text-ink-950 uppercase tracking-tight">
+            Evaluation Worksheet Restricted
+          </h3>
+          <p className="font-mono text-xs text-ink-500 leading-relaxed">
+            Approving Officers are not permitted to record raw test observation data. Your authorized duty is dual-custody review and verification sign-off.
+          </p>
+          <div className="pt-4 border-t border-editorial-border flex justify-center gap-3">
+            <Link
+              href="/verification"
+              className="bg-ink-950 hover:bg-neutral-800 text-white font-semibold px-4 py-2 text-xs uppercase tracking-wider transition-colors shadow-editorial"
+            >
+              Go to Verification Queue
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">

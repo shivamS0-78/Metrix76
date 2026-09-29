@@ -60,25 +60,30 @@ class OIMLPDFGenerator:
             else:
                 context['qr_code_base64'] = f"data:image/png;base64,{qr_png_base64}"
 
-        # 3. Render HTML using Jinja2
-        template = self.env.get_template("oiml_r76_annex_a.html")
-        html_content = template.render(**context)
+        # 3. Compile with WeasyPrint if available, otherwise fallback to ReportLab
+        if HTML is not None:
+            try:
+                template = self.env.get_template("oiml_r76_annex_a.html")
+                html_content = template.render(**context)
+                css_path = os.path.join(self.template_dir, "report_styles.css")
+                stylesheets = [CSS(filename=css_path)] if os.path.exists(css_path) else []
 
-        # 4. Compile with WeasyPrint & report_styles.css
-        if HTML is None:
-            raise RuntimeError(
-                "WeasyPrint is not available on this system because GTK/Pango C libraries are not installed. "
-                "PDF generation requires GTK/Pango or running inside the Linux Docker container."
-            )
+                pdf_buffer = io.BytesIO()
+                HTML(string=html_content, base_url=self.template_dir).write_pdf(
+                    target=pdf_buffer,
+                    stylesheets=stylesheets
+                )
+                pdf_buffer.seek(0)
+                return pdf_buffer.getvalue()
+            except Exception as e:
+                print(f"[WeasyPrint] Compilation warning ({e}), falling back to ReportLab...")
 
-        css_path = os.path.join(self.template_dir, "report_styles.css")
-        stylesheets = [CSS(filename=css_path)] if os.path.exists(css_path) else []
-
-        pdf_buffer = io.BytesIO()
-        HTML(string=html_content, base_url=self.template_dir).write_pdf(
-            target=pdf_buffer,
-            stylesheets=stylesheets
+        # Fallback to pure-Python ReportLab generator
+        from app.services.reporting.reportlab_generator import ReportLabOIMLGenerator
+        return ReportLabOIMLGenerator.render_pdf(
+            report_context=context,
+            chart_png_bytes=chart_png_bytes,
+            qr_png_base64=qr_png_base64
         )
-        pdf_buffer.seek(0)
-        return pdf_buffer.getvalue()
+
 

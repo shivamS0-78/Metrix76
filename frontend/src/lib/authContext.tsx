@@ -143,12 +143,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn('Sign out warning:', err);
+    }
     setUser(null);
     setSession(null);
     setRole(null);
     if (typeof document !== 'undefined') {
       document.cookie = `oiml_active_role=; path=/; max-age=0; SameSite=Lax`;
+    }
+    if (typeof window !== 'undefined') {
+      window.location.href = '/login';
     }
   };
 

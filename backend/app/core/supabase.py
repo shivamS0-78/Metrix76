@@ -1,7 +1,6 @@
 """
 Centralized Supabase Database & Storage Client Provider
 """
-import os
 from supabase import create_client, Client
 from app.config import settings
 
@@ -13,15 +12,16 @@ def get_supabase_client() -> Client:
     if _supabase_client is None:
         url = settings.SUPABASE_URL
         key = settings.SUPABASE_SERVICE_ROLE_KEY
-        if url and key and key != "test-key" and not url.startswith("http://localhost:54321"):
-            try:
-                _supabase_client = create_client(url, key)
-            except Exception as e:
-                print(f"[Supabase] Connection warning: {e}")
-                _supabase_client = None
-        else:
-            try:
-                _supabase_client = create_client(url, key)
-            except Exception:
-                _supabase_client = None
+
+        if not url or not key:
+            print("[Supabase] Configuration notice: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set in .env")
+            return None
+
+        try:
+            _supabase_client = create_client(url, key)
+            print(f"[Supabase] Connected to database: {url}")
+        except Exception as e:
+            print(f"[Supabase] Connection error: {e}")
+            _supabase_client = None
+
     return _supabase_client
