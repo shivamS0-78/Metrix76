@@ -18,10 +18,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import re
+from starlette.requests import Request
+
 # Root level healthcheck & live status
+@app.get("/")
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "oiml-r76-fastapi", "version": "1.0.0"}
+
+@app.middleware("http")
+async def normalize_double_slash_middleware(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if "//" in path:
+        normalized_path = re.sub(r"/+", "/", path)
+        request.scope["path"] = normalized_path
+        if "raw_path" in request.scope:
+            request.scope["raw_path"] = normalized_path.encode("ascii")
+    return await call_next(request)
 
 # Mount API v1 router
 app.include_router(api_router, prefix="/api/v1")

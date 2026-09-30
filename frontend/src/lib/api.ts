@@ -15,7 +15,8 @@ import {
   ReportSubmissionResult
 } from '@/types/metrology';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const rawBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE = rawBase.replace(/\/+$/, '');
 
 // Module 1: Dashboard API
 export async function getDashboardData(userId?: string, role?: string): Promise<DashboardData> {
