@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from app.schemas.metrology import AccuracyClass, MultiIntervalSpec
 
 class InstrumentAttachment(BaseModel):
@@ -11,14 +11,14 @@ class InstrumentAttachment(BaseModel):
     uploaded_at: Optional[datetime] = None
 
 class InstrumentBase(BaseModel):
-    serial_number: str = Field(..., example="SN-2026-NAWI-8891")
-    model_name: str = Field(..., example="PreciseWeigh Pro 15")
-    manufacturer_name: str = Field(..., example="Avery Metrology Ltd.")
+    serial_number: str = Field(..., json_schema_extra={"example": "SN-2026-NAWI-8891"})
+    model_name: str = Field(..., json_schema_extra={"example": "PreciseWeigh Pro 15"})
+    manufacturer_name: str = Field(..., json_schema_extra={"example": "Avery Metrology Ltd."})
     accuracy_class: AccuracyClass = AccuracyClass.CLASS_III
-    max_capacity: float = Field(..., gt=0, example=15.0)
-    min_capacity: float = Field(..., ge=0, example=0.1)
-    scale_interval_d: float = Field(..., gt=0, example=0.002)
-    verification_interval_e: float = Field(..., gt=0, example=0.002)
+    max_capacity: float = Field(..., gt=0, json_schema_extra={"example": 15.0})
+    min_capacity: float = Field(..., ge=0, json_schema_extra={"example": 0.1})
+    scale_interval_d: float = Field(..., gt=0, json_schema_extra={"example": 0.002})
+    verification_interval_e: float = Field(..., gt=0, json_schema_extra={"example": 0.002})
     unit: str = "kg"
     is_multi_interval: bool = False
     multi_interval_spec: Optional[List[MultiIntervalSpec]] = None
@@ -34,6 +34,4 @@ class InstrumentOut(InstrumentBase):
     calculated_n: int
     attachments: List[InstrumentAttachment] = []
     created_at: datetime
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

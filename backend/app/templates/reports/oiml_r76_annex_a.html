@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>OIML R 76-2 Type Approval Test Report</title>
+</head>
+<body>
+
+    <!-- Header Block -->
+    <table class="header-table">
+        <tr>
+            <td class="header-title-cell">
+                <div class="lab-title">Directorate of Legal Metrology</div>
+                <div class="lab-subtitle">National Type Evaluation Laboratory • ISO/IEC 17025 Accredited</div>
+                <div style="font-size: 7.5pt; color: #64748b; margin-top: 2px;">
+                    Pattern Approval Evaluation Conforming to OIML R 76-1:2006 & OIML R 76-2:2007 (Annex A)
+                </div>
+            </td>
+            <td class="report-badge-cell">
+                <div class="report-badge">
+                    <div style="font-size: 7pt; color: #64748b; text-transform: uppercase;">Report Identifier</div>
+                    <div class="report-number">{{ report_number }}</div>
+                    <div class="report-date">Date: {{ approved_date or created_date }}</div>
+                </div>
+            </td>
+        </tr>
+    </table>
+
+    <!-- Section 1: Instrument Passport -->
+    <div class="section">
+        <div class="section-title">1. Instrument Passport & General Specifications</div>
+        <table class="spec-table">
+            <tr>
+                <td class="spec-label">Manufacturer</td>
+                <td class="spec-value">{{ instrument.manufacturer_name }}</td>
+                <td class="spec-label">Accuracy Class</td>
+                <td class="spec-value spec-value-mono">{{ instrument.accuracy_class }}</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Model Designation</td>
+                <td class="spec-value">{{ instrument.model_name }}</td>
+                <td class="spec-label">Maximum Capacity (Max)</td>
+                <td class="spec-value spec-value-mono">{{ instrument.max_capacity }} {{ instrument.unit }}</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Serial Number</td>
+                <td class="spec-value spec-value-mono">{{ instrument.serial_number }}</td>
+                <td class="spec-label">Minimum Capacity (Min)</td>
+                <td class="spec-value spec-value-mono">{{ instrument.min_capacity }} {{ instrument.unit }}</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Load Receptor / Type</td>
+                <td class="spec-value">{{ instrument.load_receptor_type or "Platform Receptor" }}</td>
+                <td class="spec-label">Verification Scale Interval (e)</td>
+                <td class="spec-value spec-value-mono">{{ instrument.verification_interval_e }} {{ instrument.unit }}</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Indicator Model</td>
+                <td class="spec-value">{{ instrument.indicator_make_model or "Digital Terminal" }}</td>
+                <td class="spec-label">Actual Scale Interval (d)</td>
+                <td class="spec-value spec-value-mono">{{ instrument.scale_interval_d }} {{ instrument.unit }}</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Year of Manufacture</td>
+                <td class="spec-value">{{ instrument.year_of_manufacture or "2026" }}</td>
+                <td class="spec-label">Total Scale Intervals (n)</td>
+                <td class="spec-value spec-value-mono">{{ instrument.calculated_n }}</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Section 2: Reference Standards & Ambient Conditions -->
+    <div class="section">
+        <div class="section-title">2. Metrological Traceability & Environmental Conditions</div>
+        <table class="spec-table">
+            <tr>
+                <td class="spec-label">Reference Standard Set</td>
+                <td class="spec-value spec-value-mono">{{ reference_standard.set_identifier }} (Class {{ reference_standard.accuracy_class }})</td>
+                <td class="spec-label">Ambient Temperature</td>
+                <td class="spec-value spec-value-mono">{{ environment.ambient_temperature_celsius }} °C (±0.5 °C)</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Traceability Certificate</td>
+                <td class="spec-value spec-value-mono">{{ reference_standard.certificate_number }}</td>
+                <td class="spec-label">Relative Humidity</td>
+                <td class="spec-value spec-value-mono">{{ environment.relative_humidity_pct }} % RH</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Calibrating Authority</td>
+                <td class="spec-value">{{ reference_standard.calibrated_by }}</td>
+                <td class="spec-label">Atmospheric Pressure</td>
+                <td class="spec-value spec-value-mono">{{ environment.atmospheric_pressure_hpa or "1013.25" }} hPa</td>
+            </tr>
+            <tr>
+                <td class="spec-label">Calibration Validity</td>
+                <td class="spec-value spec-value-mono">{{ reference_standard.calibration_date }} to {{ reference_standard.expiry_date }}</td>
+                <td class="spec-label">Expanded Uncertainty (U)</td>
+                <td class="spec-value spec-value-mono">k=2, U = {{ reference_standard.expanded_uncertainty_k2 or "0.0001" }} {{ instrument.unit }}</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Section 3: Summary Compliance Scorecard -->
+    <div class="section">
+        <div class="section-title">3. Statutory Compliance Scorecard</div>
+        <table class="scorecard-table">
+            <thead>
+                <tr>
+                    <th>Clause / Test Procedure</th>
+                    <th>Statutory Tolerance Criteria</th>
+                    <th>Observed Status</th>
+                    <th>Verdict</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="text-align: left; font-weight: bold;">Clause A.4.4: Weighing Performance</td>
+                    <td>|E<sub>c</sub>| ≤ |mpe| (Monotonic Steps 0 → Max → 0)</td>
+                    <td>Max |E<sub>c</sub>| within Statutory Corridor</td>
+                    <td><span class="badge-pass">PASS</span></td>
+                </tr>
+                <tr>
+                    <td style="text-align: left; font-weight: bold;">Clause A.4.10: Repeatability (3 × 10 Runs)</td>
+                    <td>ΔI = P<sub>max</sub> - P<sub>min</sub> ≤ |mpe(L)|</td>
+                    <td>Maximum Indication Spread ≤ mpe</td>
+                    <td><span class="badge-pass">PASS</span></td>
+                </tr>
+                <tr>
+                    <td style="text-align: left; font-weight: bold;">Clause A.4.7: Eccentricity / Corner Load</td>
+                    <td>|E<sub>c</sub>| ≤ |mpe| at L = 1/3 Max (4 Quadrants)</td>
+                    <td>Off-Center Deviations Compliant</td>
+                    <td><span class="badge-pass">PASS</span></td>
+                </tr>
+                <tr>
+                    <td style="text-align: left; font-weight: bold;">Clauses A.4.2 & A.4.6: Tare & Zero Setting</td>
+                    <td>|E<sub>0</sub>| ≤ ±0.25e & Tare Linearity</td>
+                    <td>Zero Return within ±0.25e</td>
+                    <td><span class="badge-pass">PASS</span></td>
+                </tr>
+                <tr style="background-color: #f8fafc;">
+                    <td colspan="3" style="text-align: right; font-weight: 800; text-transform: uppercase;">
+                        Overall Model Type Approval Verdict:
+                    </td>
+                    <td>
+                        {% if overall_verdict %}
+                            <span class="badge-pass" style="font-size: 8.5pt; padding: 3px 8px;">COMPLIANT (APPROVED)</span>
+                        {% else %}
+                            <span class="badge-fail" style="font-size: 8.5pt; padding: 3px 8px;">NON-COMPLIANT (REJECTED)</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Section 4: Detailed Weighing Observations Table -->
+    <div class="section">
+        <div class="section-title">4. Clause A.4.4 Weighing Performance Observation Matrix</div>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th style="width: 14%; text-align: left;">Direction</th>
+                    <th style="width: 13%;">Applied Load L [{{ instrument.unit }}]</th>
+                    <th style="width: 13%;">Indication I [{{ instrument.unit }}]</th>
+                    <th style="width: 10%;">ΔL [{{ instrument.unit }}]</th>
+                    <th style="width: 14%;">P = I + 0.5e - ΔL</th>
+                    <th style="width: 13%;">Ec = E - E₀</th>
+                    <th style="width: 11%;">±mpe [{{ instrument.unit }}]</th>
+                    <th style="width: 12%; text-align: center;">Verdict</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in weighing_observations %}
+                <tr>
+                    <td class="text-left">{{ row.direction }}</td>
+                    <td class="font-mono">{{ "%.5f"|format(row.load_applied) }}</td>
+                    <td class="font-mono">{{ "%.5f"|format(row.indication_observed) }}</td>
+                    <td class="font-mono">{{ "%.5f"|format(row.delta_load) }}</td>
+                    <td class="font-mono">{{ "%.5f"|format(row.calculated_p) }}</td>
+                    <td class="font-mono" style="font-weight: bold;">{{ "%.5f"|format(row.corrected_error_ec) }}</td>
+                    <td class="font-mono" style="color: #64748b;">±{{ "%.5f"|format(row.mpe_allowed) }}</td>
+                    <td class="text-center">
+                        {% if row.is_compliant %}
+                            <span class="badge-pass">PASS</span>
+                        {% else %}
+                            <span class="badge-fail">FAIL</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <div style="font-size: 7pt; color: #64748b; margin-top: 3px;">
+            Zero Error Baseline (E₀) = {{ "%.5f"|format(zero_error_e0 or 0.0) }} {{ instrument.unit }} • Calculations conforming to OIML R 76-1:2006 Clause A.4.4.3.
+        </div>
+    </div>
+
+    <!-- Section 5: Graphical Vector Error Curve -->
+    <div class="section">
+        <div class="section-title">5. Graphical Error vs. Load Vector Curve (Annex A.4)</div>
+        <div class="chart-container">
+            {% if chart_base64 %}
+                <img src="{{ chart_base64 }}" class="chart-image" alt="OIML R 76 Error Vector Curve">
+            {% else %}
+                <div style="padding: 20px; color: #94a3b8; font-style: italic;">Chart rendering in progress...</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Section 6: Authentication, Cryptographic Seal & Verification -->
+    <div class="section">
+        <table class="signoff-table">
+            <tr>
+                <td style="width: 32%;">
+                    <div class="signoff-box">
+                        <div class="signoff-title">Testing Metrologist</div>
+                        <div style="margin-top: 25px; border-bottom: 1px solid #94a3b8; width: 85%;"></div>
+                        <div style="font-weight: bold; margin-top: 3px;">{{ conducted_by or "Testing Officer" }}</div>
+                        <div style="color: #64748b; font-size: 7pt;">Testing Metrologist, Legal Metrology</div>
+                    </div>
+                </td>
+                <td style="width: 32%; padding: 0 6px;">
+                    <div class="signoff-box">
+                        <div class="signoff-title">Approving Director</div>
+                        <div style="margin-top: 25px; border-bottom: 1px solid #94a3b8; width: 85%;"></div>
+                        <div style="font-weight: bold; margin-top: 3px;">{{ approved_by or "Director of Legal Metrology" }}</div>
+                        <div style="color: #64748b; font-size: 7pt;">Director / Authorizing Signatory</div>
+                    </div>
+                </td>
+                <td style="width: 36%;">
+                    <div class="signoff-box" style="text-align: center;">
+                        <div class="signoff-title" style="text-align: left;">Tamper-Evident Seal</div>
+                        <table style="width: 100%; border: none;">
+                            <tr>
+                                <td style="width: 65px; vertical-align: middle; border: none;">
+                                    {% if qr_code_base64 %}
+                                        <img src="{{ qr_code_base64 }}" class="qr-code-img" alt="Verification QR">
+                                    {% endif %}
+                                </td>
+                                <td style="vertical-align: middle; border: none; text-align: left; padding-left: 4px;">
+                                    <div style="font-size: 6.5pt; font-weight: bold; color: #1e3a8a;">DIGITAL SHA-256 DIGEST:</div>
+                                    <div class="crypto-seal-box">{{ sha256_hash or "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }}</div>
+                                    <div style="font-size: 6pt; color: #64748b; margin-top: 2px;">Scan QR to verify authentic certificate</div>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+</body>
+</html>

@@ -4,15 +4,16 @@ frontend/.next/
 frontend/out/
 frontend/.env.local
 frontend/.env.*.local
+*.tsbuildinfo
 
 # Python / FastAPI
-backend/__pycache__/
-backend/*/__pycache__/
-backend/*/*/__pycache__/
-backend/*.pyc
+**/__pycache__/
+*.py[cod]
+*$py.class
 backend/.pytest_cache/
 backend/venv/
 backend/.env
+.pytest_cache/
 
 # System / Tools
 .DS_Store
@@ -20,3 +21,6 @@ Thumbs.db
 .vscode/
 .idea/
 backend/generated_reports/
+
+# Environment Variables
+.env

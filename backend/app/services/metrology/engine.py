@@ -30,24 +30,24 @@ class OIMLR76Engine:
         m = abs(load) / e
 
         if spec.accuracy_class == AccuracyClass.CLASS_I:
-            if m <= 50000: return 0.5 * e
-            if m <= 200000: return 1.0 * e
-            return 1.5 * e
+            if m <= 50000: return round(0.5 * e, 10)
+            if m <= 200000: return round(1.0 * e, 10)
+            return round(1.5 * e, 10)
 
         elif spec.accuracy_class == AccuracyClass.CLASS_II:
-            if m <= 5000: return 0.5 * e
-            if m <= 20000: return 1.0 * e
-            return 1.5 * e
+            if m <= 5000: return round(0.5 * e, 10)
+            if m <= 20000: return round(1.0 * e, 10)
+            return round(1.5 * e, 10)
 
         elif spec.accuracy_class == AccuracyClass.CLASS_III:
-            if m <= 500: return 0.5 * e
-            if m <= 2000: return 1.0 * e
-            return 1.5 * e
+            if m <= 500: return round(0.5 * e, 10)
+            if m <= 2000: return round(1.0 * e, 10)
+            return round(1.5 * e, 10)
 
         elif spec.accuracy_class == AccuracyClass.CLASS_IIII:
-            if m <= 50: return 0.5 * e
-            if m <= 200: return 1.0 * e
-            return 1.5 * e
+            if m <= 50: return round(0.5 * e, 10)
+            if m <= 200: return round(1.0 * e, 10)
+            return round(1.5 * e, 10)
 
         raise ValueError(f"Unsupported accuracy class: {spec.accuracy_class}")
 

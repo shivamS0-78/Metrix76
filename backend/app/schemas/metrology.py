@@ -9,11 +9,13 @@ class AccuracyClass(str, Enum):
     CLASS_IIII = "CLASS_IIII"
 
 class TestDirection(str, Enum):
+    __test__ = False
     INCREASING = "INCREASING"
     DECREASING = "DECREASING"
     STATIC = "STATIC"
 
 class TestType(str, Enum):
+    __test__ = False
     WEIGHING = "WEIGHING"
     REPEATABILITY = "REPEATABILITY"
     ECCENTRICITY = "ECCENTRICITY"
@@ -140,9 +142,23 @@ class TareBalancingInput(BaseModel):
     indication_observed: float
     delta_load: float
 
+class TareZeroBatchRequest(BaseModel):
+    instrument: InstrumentMeta
+    zero_setting: ZeroSettingInput
+    tare_balancing: List[TareBalancingInput]
+
 class TareZeroEvaluationResponse(BaseModel):
     zero_setting_error: float
     zero_setting_mpe: float # 0.25e
     zero_setting_compliant: bool
     tare_results: List[WeighingEvaluationResult]
     overall_compliant: bool
+
+# --- 5. ISO/IEC Guide 98-3 (GUM) Measurement Uncertainty ---
+class UncertaintyCalculationRequest(BaseModel):
+    scale_interval_d: float
+    repeatability_std_dev: float
+    n_repeat_observations: int = 10
+    standard_expanded_uncertainty_k2: Optional[float] = None
+    coverage_factor_k: float = 2.0
+

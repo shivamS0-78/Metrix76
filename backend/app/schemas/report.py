@@ -4,6 +4,8 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from app.schemas.metrology import (
     AccuracyClass,
+    TestDirection,
+    TestType,
     WeighingPointInput,
     WeighingEvaluationResult,
     RepeatabilitySeriesResult,
@@ -19,9 +21,9 @@ class ReportStatus(str, Enum):
     REJECTED = "REJECTED"
 
 class EnvironmentalConditions(BaseModel):
-    ambient_temperature_celsius: float = Field(..., example=22.5)
-    relative_humidity_pct: float = Field(..., example=55.0)
-    atmospheric_pressure_hpa: Optional[float] = Field(1013.25, example=1013.25)
+    ambient_temperature_celsius: float = Field(..., json_schema_extra={"example": 22.5})
+    relative_humidity_pct: float = Field(..., json_schema_extra={"example": 55.0})
+    atmospheric_pressure_hpa: Optional[float] = Field(1013.25, json_schema_extra={"example": 1013.25})
     temp_min_allowed: Optional[float] = -10.0
     temp_max_allowed: Optional[float] = 40.0
 
@@ -40,6 +42,26 @@ class TestReportCreate(BaseModel):
     relative_humidity_pct: float
     atmospheric_pressure_hpa: Optional[float] = 1013.25
     technical_checklist: TechnicalChecklist = TechnicalChecklist()
+    conducted_by: Optional[str] = None
+
+class TestObservationRowPayload(BaseModel):
+    test_type: TestType = TestType.WEIGHING
+    direction: TestDirection = TestDirection.INCREASING
+    sequence_order: int = Field(1, ge=1)
+    load_applied: float
+    indication_observed: float
+    delta_load: float = 0.0
+    position_tag: Optional[str] = None
+    run_cycle: Optional[int] = None
+
+class BatchObservationPayload(BaseModel):
+    report_id: str
+    observations: List[TestObservationRowPayload]
+
+class ReportSubmissionResponse(BaseModel):
+    report_id: str
+    status: ReportStatus
+    message: str
 
 class VerificationAction(BaseModel):
     action: str # "APPROVE" or "REJECT"

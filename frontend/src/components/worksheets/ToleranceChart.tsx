@@ -41,25 +41,25 @@ export default function ToleranceChart({ instrument, results }: ToleranceChartPr
   });
 
   return (
-    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-xs space-y-3">
-      <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+    <div className="bg-white p-6 border border-editorial-border shadow-editorial space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-editorial-border gap-3">
         <div>
-          <h3 className="text-sm font-bold text-slate-800 tracking-tight">
-            Dynamic Error Envelope & Statutory MPE Corridor
+          <h3 className="font-display font-black text-xs uppercase tracking-wider text-ink-950">
+            DYNAMIC ERROR ENVELOPE & STATUTORY MPE CORRIDOR
           </h3>
-          <p className="text-xs text-slate-500">
-            Real-time visual comparison of corrected error (Ec) against statutory ±mpe tolerance boundaries.
+          <p className="text-[11px] font-mono text-ink-500 uppercase mt-0.5">
+            REAL-TIME COMPARISON OF CORRECTED ERROR (Ec) AGAINST STATUTORY ±mpe BOUNDARIES (OIML R 76-1)
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs">
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span> Safe
+        <div className="flex items-center gap-4 text-[10px] font-mono uppercase font-bold tracking-wider">
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 bg-emerald-600 inline-block"></span> CONFORMING
           </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span> Warning (&gt;90%)
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 bg-amber-500 inline-block"></span> NEAR LIMIT (&gt;90%)
           </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block"></span> Breach (Fail)
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 bg-rose-600 inline-block"></span> EXCEEDED (FAIL)
           </span>
         </div>
       </div>
@@ -67,35 +67,37 @@ export default function ToleranceChart({ instrument, results }: ToleranceChartPr
       <div className="w-full h-72">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={chartData} margin={{ top: 15, right: 30, left: 10, bottom: 20 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+            <CartesianGrid strokeDasharray="2 2" stroke="#E2E2DE" />
             <XAxis
               dataKey="load"
               unit={` ${instrument.unit}`}
-              stroke="#64748b"
-              fontSize={11}
-              label={{ value: `Applied Load L [${instrument.unit}]`, position: 'insideBottom', offset: -10, fontSize: 11 }}
+              stroke="#737373"
+              fontSize={10}
+              tickLine={false}
+              label={{ value: `APPLIED LOAD L [${instrument.unit}]`, position: 'insideBottom', offset: -10, fontSize: 10, fill: '#737373', fontFamily: 'monospace' }}
             />
             <YAxis
               unit={` ${instrument.unit}`}
-              stroke="#64748b"
-              fontSize={11}
-              label={{ value: `Ec [${instrument.unit}]`, angle: -90, position: 'insideLeft', fontSize: 11 }}
+              stroke="#737373"
+              fontSize={10}
+              tickLine={false}
+              label={{ value: `Ec [${instrument.unit}]`, angle: -90, position: 'insideLeft', fontSize: 10, fill: '#737373', fontFamily: 'monospace' }}
             />
             <Tooltip
               formatter={(val: any, name: string) => [
                 typeof val === 'number' ? `${val.toFixed(5)} ${instrument.unit}` : val,
-                name === 'upperMpe' ? '+mpe' : name === 'lowerMpe' ? '-mpe' : 'Corrected Error Ec'
+                name === 'upperMpe' ? '+mpe (Upper)' : name === 'lowerMpe' ? '-mpe (Lower)' : 'Corrected Error Ec'
               ]}
-              labelFormatter={(label) => `Load: ${label} ${instrument.unit}`}
-              contentStyle={{ backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '11px' }}
+              labelFormatter={(label) => `LOAD: ${label} ${instrument.unit}`}
+              contentStyle={{ backgroundColor: '#0A0A0A', color: '#FFFFFF', borderRadius: '0px', border: '1px solid #262626', fontSize: '10px', fontFamily: 'monospace' }}
             />
-            <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="2 2" />
+            <ReferenceLine y={0} stroke="#A3A3A3" strokeDasharray="3 3" />
 
             {/* Statutory ±mpe tolerance step lines */}
             <Line
               type="stepAfter"
               dataKey="upperMpe"
-              stroke="#ef4444"
+              stroke="#DC2626"
               strokeDasharray="4 4"
               strokeWidth={1.5}
               dot={false}
@@ -104,7 +106,7 @@ export default function ToleranceChart({ instrument, results }: ToleranceChartPr
             <Line
               type="stepAfter"
               dataKey="lowerMpe"
-              stroke="#ef4444"
+              stroke="#DC2626"
               strokeDasharray="4 4"
               strokeWidth={1.5}
               dot={false}
@@ -115,9 +117,9 @@ export default function ToleranceChart({ instrument, results }: ToleranceChartPr
             <Line
               type="monotone"
               dataKey="correctedErrorEc"
-              stroke="#2563eb"
+              stroke="#0A0A0A"
               strokeWidth={2}
-              dot={{ r: 4, fill: '#2563eb' }}
+              dot={{ r: 4, fill: '#0A0A0A' }}
               activeDot={{ r: 6 }}
               name="Corrected Error (Ec)"
             />

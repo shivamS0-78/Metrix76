@@ -163,3 +163,77 @@ export interface DashboardData {
   technician_work_queue: TestReportSummary[];
   approver_work_queue: TestReportSummary[];
 }
+
+export interface TechnicalChecklist {
+  level_indicator_present?: boolean;
+  zero_setting_operative?: boolean;
+  tare_device_operative?: boolean;
+  security_sealing_intact?: boolean;
+  audit_counter_value?: string;
+  notes?: string | null;
+}
+
+export interface CreateReportDraftPayload {
+  instrument_id: string;
+  reference_standard_id: string;
+  ambient_temperature_celsius: number;
+  relative_humidity_pct: number;
+  atmospheric_pressure_hpa?: number;
+  technical_checklist: TechnicalChecklist;
+  conducted_by?: string;
+}
+
+export interface ReportObservationInput {
+  test_type: TestType;
+  direction: TestDirection;
+  sequence_order: number;
+  load_applied: number;
+  indication_observed: number;
+  delta_load: number;
+  position_tag?: string;
+  run_cycle?: number;
+}
+
+export interface BatchObservationPayload {
+  report_id: string;
+  observations: ReportObservationInput[];
+}
+
+export interface EnvironmentalConditions {
+  ambient_temperature_celsius: number;
+  relative_humidity_pct: number;
+  atmospheric_pressure_hpa?: number;
+  temp_min_allowed?: number;
+  temp_max_allowed?: number;
+}
+
+export interface TestReportDetail {
+  id: string;
+  report_number: string;
+  attempt_number: number;
+  status: ReportStatus;
+  standard_version: string;
+  instrument: Instrument;
+  reference_standard: ReferenceStandard;
+  environment: EnvironmentalConditions;
+  technical_checklist: TechnicalChecklist;
+  overall_verdict: boolean | null;
+  rejection_reason?: string | null;
+  sha256_hash?: string | null;
+  pdf_storage_path?: string | null;
+  docx_storage_path?: string | null;
+  weighing_observations: WeighingEvaluationResult[];
+  repeatability_results: RepeatabilitySeriesResult[];
+  eccentricity_results: EccentricityEvaluationResult[];
+  conducted_by: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReportSubmissionResult {
+  report_id: string;
+  status: ReportStatus;
+  message: string;
+}
