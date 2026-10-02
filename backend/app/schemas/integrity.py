@@ -57,3 +57,12 @@ class IntegrityVerifyResponse(BaseModel):
     qr_code_base64: Optional[str] = None
     timestamp: datetime = Field(default_factory=_now_utc)
     details: Optional[str] = None
+
+
+from app.services.integrity.models import (
+    IntegrityStatus,
+    EntityType,
+    IntegrityEntry,
+    IntegrityFailureDetail,
+    IntegrityVerificationResult,
+)

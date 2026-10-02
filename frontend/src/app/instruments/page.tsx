@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { 
   Scale, 
   Plus, 
@@ -14,10 +16,13 @@ import {
   Sparkles, 
   Building, 
   Tag, 
-  Hash 
+  Hash,
+  FilePlus,
+  Trash2
 } from 'lucide-react';
-import { listInstruments, validateInstrumentSanity, createInstrument } from '@/lib/api';
-import { Instrument, InstrumentMeta, SanityCheckResult, AccuracyClass } from '@/types/metrology';
+import { listInstruments, validateInstrumentSanity, createInstrument, createReportDraft, deleteReportDraft, listReferenceStandards, searchArchive } from '@/lib/api';
+import { useAuth } from '@/lib/authContext';
+import { Instrument, InstrumentMeta, SanityCheckResult, AccuracyClass, ReferenceStandard, TestReportSummary } from '@/types/metrology';
 
 export default function InstrumentsPage() {
   const [instruments, setInstruments] = useState<Instrument[]>([]);
@@ -26,6 +31,11 @@ export default function InstrumentsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successToast, setSuccessToast] = useState<string | null>(null);
+  const [referenceStandards, setReferenceStandards] = useState<ReferenceStandard[]>([]);
+  const [activeDrafts, setActiveDrafts] = useState<TestReportSummary[]>([]);
+  const [creatingDraftId, setCreatingDraftId] = useState<string | null>(null);
+  const { user } = useAuth();
+  const router = useRouter();
 
   // Form state for creating a new instrument
   const [formState, setFormState] = useState({
@@ -56,6 +66,23 @@ export default function InstrumentsPage() {
   });
   const [sandboxSanity, setSandboxSanity] = useState<SanityCheckResult | null>(null);
 
+  const fetchDraftsAndStandards = async () => {
+    try {
+      const [stds, drafts] = await Promise.allSettled([
+        listReferenceStandards(),
+        searchArchive(undefined, undefined, undefined, 'DRAFT'),
+      ]);
+      if (stds.status === 'fulfilled') {
+        setReferenceStandards(stds.value);
+      }
+      if (drafts.status === 'fulfilled') {
+        setActiveDrafts(drafts.value);
+      }
+    } catch (e) {
+      console.warn('Failed to load standards/drafts for instruments:', e);
+    }
+  };
+
   const fetchInstruments = () => {
     setLoadingList(true);
     listInstruments()
@@ -72,7 +99,69 @@ export default function InstrumentsPage() {
 
   useEffect(() => {
     fetchInstruments();
+    fetchDraftsAndStandards();
   }, []);
+
+  const handleStartDraftForInstrument = async (inst: Instrument) => {
+    setCreatingDraftId(inst.id);
+    try {
+      const activeStd = referenceStandards.find((s) => s.is_active && !s.is_expired) ?? referenceStandards[0];
+      const standardId = activeStd?.id ?? 'std-001';
+
+      const draft = await createReportDraft({
+        instrument_id: inst.id,
+        reference_standard_id: standardId,
+        ambient_temperature_celsius: 20.0,
+        relative_humidity_pct: 50.0,
+        atmospheric_pressure_hpa: 1013.25,
+        technical_checklist: {
+          level_indicator_present: true,
+          zero_setting_operative: true,
+          tare_device_operative: true,
+          security_sealing_intact: true,
+          audit_counter_value: 'AC-0001',
+          notes: `Explicit draft creation from Instrument Registry for ${inst.model_name}`,
+        },
+        conducted_by: user?.id,
+      });
+
+      setSuccessToast(`Draft evaluation (${draft.report_number}) created for ${inst.model_name}! Redirecting to evaluation...`);
+      setTimeout(() => {
+        router.push(`/evaluations?reportId=${draft.id}`);
+      }, 700);
+    } catch (err: any) {
+      console.error('Failed to create draft:', err);
+      alert(`Could not create draft evaluation: ${err.message || 'Server error'}`);
+    } finally {
+      setCreatingDraftId(null);
+    }
+  };
+
+  const [deletingDraftId, setDeletingDraftId] = useState<string | null>(null);
+
+  const handleDeleteDraft = async (draftId: string, reportNumber: string) => {
+    if (!confirm(`Are you sure you want to delete draft "${reportNumber}"? This action cannot be undone.`)) {
+      return;
+    }
+    setDeletingDraftId(draftId);
+    try {
+      await deleteReportDraft(draftId);
+      setActiveDrafts((prev) => prev.filter((d) => d.id !== draftId));
+      setSuccessToast(`Draft "${reportNumber}" deleted successfully.`);
+      setTimeout(() => setSuccessToast(null), 4000);
+      if (typeof window !== 'undefined') {
+        const active = window.localStorage.getItem('metrix76_active_report_id');
+        if (active === draftId) {
+          window.localStorage.removeItem('metrix76_active_report_id');
+        }
+      }
+    } catch (e: any) {
+      console.error('Failed to delete draft:', e);
+      alert(`Could not delete draft: ${e.message || 'Server error'}`);
+    } finally {
+      setDeletingDraftId(null);
+    }
+  };
 
   // Sandbox sanity validator
   useEffect(() => {
@@ -301,37 +390,92 @@ export default function InstrumentsPage() {
                 <th className="p-4">CAPACITY (MAX / MIN)</th>
                 <th className="p-4">INTERVALS (e / d)</th>
                 <th className="p-4">DIVISIONS (n)</th>
+                <th className="p-4 text-right">EVALUATION ACTIONS</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-editorial-border">
               {instruments.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-10 text-center font-mono text-xs text-ink-400">
+                  <td colSpan={8} className="p-10 text-center font-mono text-xs text-ink-400">
                     No instruments registered yet. Click &quot;NEW INSTRUMENT PASSPORT&quot; to create one.
                   </td>
                 </tr>
               ) : (
-                instruments.map((inst) => (
-                  <tr key={inst.id} className="hover:bg-alabaster-50 transition-colors">
-                    <td className="p-4 font-bold font-mono text-ink-950">{inst.serial_number}</td>
-                    <td className="p-4 font-bold text-ink-900">{inst.model_name}</td>
-                    <td className="p-4 text-ink-700">{inst.manufacturer_name}</td>
-                    <td className="p-4">
-                      <span className="px-2 py-0.5 font-mono text-[9px] font-bold bg-ink-950 text-white uppercase">
-                        {inst.accuracy_class}
-                      </span>
-                    </td>
-                    <td className="p-4 font-mono text-ink-800">
-                      {inst.max_capacity} {inst.unit} / {inst.min_capacity} {inst.unit}
-                    </td>
-                    <td className="p-4 font-mono text-ink-800">
-                      e={inst.verification_interval_e} / d={inst.scale_interval_d}
-                    </td>
-                    <td className="p-4 font-mono font-bold text-ink-950">
-                      {inst.calculated_n ? inst.calculated_n.toLocaleString() : (inst.max_capacity / inst.verification_interval_e).toLocaleString()}
-                    </td>
-                  </tr>
-                ))
+                instruments.map((inst) => {
+                  const matchingDrafts = activeDrafts.filter(
+                    (d) => d.instrument_serial === inst.serial_number || d.instrument_model === inst.model_name
+                  );
+                  const activeDraft = matchingDrafts[0] ?? null;
+
+                  return (
+                    <tr key={inst.id} className="hover:bg-alabaster-50 transition-colors">
+                      <td className="p-4 font-bold font-mono text-ink-950">{inst.serial_number}</td>
+                      <td className="p-4 font-bold text-ink-900">{inst.model_name}</td>
+                      <td className="p-4 text-ink-700">{inst.manufacturer_name}</td>
+                      <td className="p-4">
+                        <span className="px-2 py-0.5 font-mono text-[9px] font-bold bg-ink-950 text-white uppercase">
+                          {inst.accuracy_class}
+                        </span>
+                      </td>
+                      <td className="p-4 font-mono text-ink-800">
+                        {inst.max_capacity} {inst.unit} / {inst.min_capacity} {inst.unit}
+                      </td>
+                      <td className="p-4 font-mono text-ink-800">
+                        e={inst.verification_interval_e} / d={inst.scale_interval_d}
+                      </td>
+                      <td className="p-4 font-mono font-bold text-ink-950">
+                        {inst.calculated_n ? inst.calculated_n.toLocaleString() : (inst.max_capacity / inst.verification_interval_e).toLocaleString()}
+                      </td>
+                      <td className="p-4 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          {activeDraft ? (
+                            <>
+                              <Link
+                                href={`/evaluations?reportId=${activeDraft.id}`}
+                                className="px-3 py-1.5 bg-ink-950 hover:bg-neutral-800 text-white font-mono text-[10px] font-bold uppercase tracking-wider transition-colors inline-flex items-center gap-1 shadow-xs"
+                              >
+                                <span>RESUME DRAFT ({activeDraft.report_number})</span>
+                              </Link>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteDraft(activeDraft.id, activeDraft.report_number)}
+                                disabled={deletingDraftId === activeDraft.id}
+                                className="px-2.5 py-1.5 bg-white hover:bg-rose-50 border border-editorial-border hover:border-rose-300 text-rose-700 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors inline-flex items-center gap-1 cursor-pointer"
+                                title={`Delete draft ${activeDraft.report_number}`}
+                              >
+                                {deletingDraftId === activeDraft.id ? (
+                                  <span className="w-3 h-3 border-2 border-rose-600 border-t-transparent rounded-full animate-spin inline-block" />
+                                ) : (
+                                  <Trash2 className="w-3 h-3" />
+                                )}
+                                <span>DELETE DRAFT</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleStartDraftForInstrument(inst)}
+                                disabled={creatingDraftId === inst.id}
+                                className="px-2.5 py-1.5 bg-white hover:bg-alabaster-100 border border-editorial-border text-ink-900 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors inline-flex items-center gap-1 cursor-pointer"
+                                title="Create an additional draft for this instrument"
+                              >
+                                {creatingDraftId === inst.id ? 'CREATING...' : '+ NEW DRAFT'}
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleStartDraftForInstrument(inst)}
+                              disabled={creatingDraftId === inst.id}
+                              className="px-3 py-1.5 bg-ink-950 hover:bg-neutral-800 disabled:opacity-50 text-white font-mono text-[10px] font-bold uppercase tracking-wider transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                            >
+                              <FilePlus className="w-3.5 h-3.5" />
+                              <span>{creatingDraftId === inst.id ? 'SAVING DRAFT...' : 'SAVE DRAFT / START EVALUATION'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

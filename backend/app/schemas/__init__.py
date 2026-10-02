@@ -25,7 +25,17 @@ from app.schemas.metrology import (
 from app.schemas.integrity import (
     IntegritySeal,
     IntegrityVerifyRequest,
-    IntegrityVerifyResponse
+    IntegrityVerifyResponse,
+    IntegrityStatus,
+    EntityType,
+    IntegrityEntry,
+    IntegrityFailureDetail,
+    IntegrityVerificationResult,
+)
+from app.services.metrology.explanations import (
+    FailureCode,
+    FailureExplanation,
+    FailureExplanationResponse,
 )
 
 __all__ = [
@@ -50,5 +60,13 @@ __all__ = [
     "SanityCheckResult",
     "IntegritySeal",
     "IntegrityVerifyRequest",
-    "IntegrityVerifyResponse"
+    "IntegrityVerifyResponse",
+    "IntegrityStatus",
+    "EntityType",
+    "IntegrityEntry",
+    "IntegrityFailureDetail",
+    "IntegrityVerificationResult",
+    "FailureCode",
+    "FailureExplanation",
+    "FailureExplanationResponse",
 ]

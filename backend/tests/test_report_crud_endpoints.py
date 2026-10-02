@@ -295,3 +295,45 @@ def test_get_current_user_rejects_token_when_secret_not_configured(monkeypatch):
     assert "SUPABASE_JWT_SECRET is not configured" in exc_info.value.detail
 
 
+def test_delete_draft_report():
+    standard_response = client.post(
+        "/api/v1/standards/",
+        json={
+            "set_identifier": "NPL-TEST-SET-DELETE",
+            "accuracy_class": "E2",
+            "certificate_number": "CAL-2026-DEL1",
+            "calibrated_by": "National Physical Laboratory",
+            "calibration_date": "2026-09-01",
+            "expiry_date": "2027-09-01",
+            "expanded_uncertainty_k2": 0.0001,
+            "nominal_range": "1 mg to 50 kg",
+            "is_active": True,
+        },
+    )
+    assert standard_response.status_code == 201
+    standard_id = standard_response.json()["id"]
+
+    draft_response = client.post(
+        "/api/v1/reports/draft",
+        json={
+            "instrument_id": "inst-001",
+            "reference_standard_id": standard_id,
+            "ambient_temperature_celsius": 20.0,
+            "relative_humidity_pct": 50.0,
+            "atmospheric_pressure_hpa": 1013.25,
+            "technical_checklist": {"notes": "draft to delete"},
+        },
+    )
+    assert draft_response.status_code == 201
+    draft_id = draft_response.json()["id"]
+
+    del_response = client.delete(f"/api/v1/reports/{draft_id}")
+    assert del_response.status_code == 200
+    assert del_response.json()["status"] == "success"
+
+    # Confirm it cannot be found anymore
+    get_response = client.get(f"/api/v1/reports/{draft_id}")
+    assert get_response.status_code == 404
+
+
+

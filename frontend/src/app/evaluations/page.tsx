@@ -9,9 +9,18 @@ import {
   ClipboardList,
   Save,
   ArrowRight,
-  Gauge
+  Gauge,
+  ShieldAlert,
+  ShieldCheck,
+  Database,
+  RefreshCw,
+  Search,
+  AlertTriangle,
+  Info,
+  Trash2
 } from 'lucide-react';
 import {
+  Instrument,
   InstrumentMeta,
   WeighingPointInput,
   WeighingBatchResponse,
@@ -19,6 +28,13 @@ import {
   EccentricityBatchResponse,
   ReferenceStandard,
   ReportObservationInput,
+  FailureExplanation,
+  FailureExplanationResponse,
+  IntegrityVerificationResult,
+  IntegrityEntry,
+  TestPlan,
+  TestPlanDiff,
+  TestPlanItem
 } from '@/types/metrology';
 import {
   evaluateWeighingPoints,
@@ -26,11 +42,24 @@ import {
   listReferenceStandards,
   listInstruments,
   createReportDraft,
+  deleteReportDraft,
+  getReportDetail,
   upsertReportObservations,
   submitReportForReview,
+  getFailureExplanations,
+  getIntegrityStatus,
+  verifyReportIntegrity,
+  getIntegrityEntries,
+  simulateTamper,
+  generateTestPlan,
+  getTestPlan,
+  regenerateTestPlan
 } from '@/lib/api';
 import { getMPE, evaluateWeighingClient } from '@/lib/metrology/r76';
 import ToleranceChart from '@/components/worksheets/ToleranceChart';
+import FailureDetailPanel from '@/components/worksheets/FailureDetailPanel';
+import LedgerViewerModal from '@/components/integrity/LedgerViewerModal';
+import TestPlanPanel from '@/components/test_plan/TestPlanPanel';
 import { useAuth } from '@/lib/authContext';
 
 const STORAGE_KEY = 'draft_evaluation_default';
@@ -154,6 +183,12 @@ export default function EvaluationsPage() {
     if (typeof window === 'undefined') return null;
 
     try {
+      const urlParam = new URLSearchParams(window.location.search).get('reportId');
+      if (urlParam) return urlParam;
+
+      const stored = window.localStorage.getItem('metrix76_active_report_id');
+      if (stored) return stored;
+
       const generic = window.localStorage.getItem(STORAGE_KEY);
       if (!generic) return null;
       const parsed = JSON.parse(generic);
@@ -163,6 +198,10 @@ export default function EvaluationsPage() {
       return null;
     }
   });
+
+  const [loadedReportNumber, setLoadedReportNumber] = useState<string | null>(null);
+  const [savingDraft, setSavingDraft] = useState<boolean>(false);
+  const [draftSavedToast, setDraftSavedToast] = useState<string | null>(null);
 
   const readSavedDraft = (draftId: string | null = reportId) => {
     if (typeof window === 'undefined') return null;
@@ -194,6 +233,25 @@ export default function EvaluationsPage() {
   }));
   const [wizardStep, setWizardStep] = useState<number>(() => savedDraft?.wizardStep ?? 1);
   const [instrumentId, setInstrumentId] = useState<string>(() => savedDraft?.instrumentId ?? 'inst-001');
+  const [availableInstruments, setAvailableInstruments] = useState<Instrument[]>([]);
+  const [instrumentSourceMode, setInstrumentSourceMode] = useState<'REGISTERED' | 'CUSTOM'>(() => savedDraft?.instrumentSourceMode ?? 'REGISTERED');
+
+  const handleSelectRegisteredInstrument = (id: string) => {
+    setInstrumentId(id);
+    const found = availableInstruments.find((inst) => inst.id === id);
+    if (found) {
+      setInstrument({
+        accuracy_class: found.accuracy_class,
+        max_capacity: Number(found.max_capacity),
+        min_capacity: Number(found.min_capacity),
+        scale_interval_d: Number(found.scale_interval_d),
+        verification_interval_e: Number(found.verification_interval_e),
+        unit: found.unit || 'kg',
+        is_multi_interval: Boolean(found.is_multi_interval),
+      });
+    }
+  };
+
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [ambientSetup, setAmbientSetup] = useState<AmbientSetupState>(() => ({
     ...defaultAmbientSetup,
@@ -238,6 +296,489 @@ export default function EvaluationsPage() {
   }));
   const [submissionState, setSubmissionState] = useState<'idle' | 'submitted'>('idle');
 
+  // Feature 1: Clause-Level Failure Explanations
+  const [failureData, setFailureData] = useState<FailureExplanationResponse | null>(null);
+  const [selectedExplanation, setSelectedExplanation] = useState<FailureExplanation | null>(null);
+  const [isDetailOpen, setIsDetailOpen] = useState<boolean>(false);
+  const [loadingExplanations, setLoadingExplanations] = useState<boolean>(false);
+
+  // Feature 2: Cryptographic Raw-Data Ledger
+  const [integrityResult, setIntegrityResult] = useState<IntegrityVerificationResult | null>(null);
+  const [ledgerEntries, setLedgerEntries] = useState<IntegrityEntry[]>([]);
+  const [isLedgerOpen, setIsLedgerOpen] = useState<boolean>(false);
+  const [verifyingIntegrity, setVerifyingIntegrity] = useState<boolean>(false);
+
+  // Feature 3: Automatic OIML Test Plan Generator
+  const [testPlan, setTestPlan] = useState<TestPlan | null>(() => savedDraft?.testPlan ?? null);
+  const [testPlanLoading, setTestPlanLoading] = useState<boolean>(false);
+  const [testPlanError, setTestPlanError] = useState<string | null>(null);
+  const [testPlanDiff, setTestPlanDiff] = useState<TestPlanDiff | null>(null);
+
+  const isPlanStale = Boolean(
+    testPlan &&
+    testPlan.instrument_snapshot &&
+    (
+      testPlan.instrument_snapshot.accuracy_class !== instrument.accuracy_class ||
+      Number(testPlan.instrument_snapshot.max_capacity) !== Number(instrument.max_capacity) ||
+      Number(testPlan.instrument_snapshot.min_capacity) !== Number(instrument.min_capacity) ||
+      Number(testPlan.instrument_snapshot.verification_interval_e) !== Number(instrument.verification_interval_e) ||
+      Number(testPlan.instrument_snapshot.scale_interval_d) !== Number(instrument.scale_interval_d) ||
+      testPlan.instrument_snapshot.unit !== instrument.unit
+    )
+  );
+
+  const applyPlanLoadPoints = () => {
+    const weighingItem = testPlan?.items.find((i) => i.test_type === 'WEIGHING');
+    const config = weighingItem?.procedure_config as any;
+    if (config && Array.isArray(config.load_points) && config.load_points.length > 0) {
+      const inc: WeighingPointInput[] = config.load_points.map((p: any) => ({
+        load_applied: p.nominal_kg,
+        indication_observed: p.nominal_kg,
+        delta_load: instrument.scale_interval_d * 0.1,
+        direction: 'INCREASING',
+      }));
+      const dec: WeighingPointInput[] = [...config.load_points].reverse().map((p: any) => ({
+        load_applied: p.nominal_kg,
+        indication_observed: p.nominal_kg,
+        delta_load: instrument.scale_interval_d * 0.1,
+        direction: 'DECREASING',
+      }));
+      setPoints([...inc, ...dec]);
+    }
+  };
+
+  const applyPlanEccentricity = () => {
+    const eccItem = testPlan?.items.find((i) => i.test_type === 'ECCENTRICITY');
+    const config = eccItem?.procedure_config as any;
+    if (config && Array.isArray(config.positions)) {
+      const cornerLoad = config.load_kg ?? Number((instrument.max_capacity / 3).toFixed(2));
+      const pts: EccentricityPointInput[] = config.positions.map((pos: string) => ({
+        position_tag: pos,
+        load_applied: cornerLoad,
+        indication_observed: cornerLoad,
+        delta_load: instrument.scale_interval_d * 0.1,
+      }));
+      setEccentricityPoints(pts);
+    }
+  };
+
+  const applyPlanRepeatability = () => {
+    const repItem = testPlan?.items.find((i) => i.test_type === 'REPEATABILITY');
+    const config = repItem?.procedure_config as any;
+    if (config && Array.isArray(config.series)) {
+      const seriesList: RepeatabilitySeriesState[] = config.series.map((s: any) => ({
+        id: s.id,
+        label: s.label,
+        nominalLoad: s.nominal_load,
+        readings: Array(s.runs || 10).fill(Number((s.nominal_load * 0.001).toFixed(4))),
+      }));
+      setRepeatabilityData(seriesList);
+    }
+  };
+
+  const fetchDiagnostics = async (rId: string) => {
+    try {
+      setLoadingExplanations(true);
+      const [expl, integ] = await Promise.allSettled([
+        getFailureExplanations(rId),
+        getIntegrityStatus(rId)
+      ]);
+      if (expl.status === 'fulfilled') {
+        setFailureData(expl.value);
+      }
+      if (integ.status === 'fulfilled') {
+        setIntegrityResult(integ.value);
+      }
+    } catch (e) {
+      console.warn('Failed to load diagnostics:', e);
+    } finally {
+      setLoadingExplanations(false);
+    }
+  };
+
+  const handleSaveDraftToDatabase = async (): Promise<string | null> => {
+    setSavingDraft(true);
+    const fallbackStandardId = referenceStandards.find((s) => s.set_identifier === ambientSetup.reference_standard)?.id ?? referenceStandards[0]?.id ?? 'std-001';
+    try {
+      let activeId = reportId;
+      if (!activeId) {
+        const draft = await createReportDraft({
+          instrument_id: instrumentId,
+          reference_standard_id: fallbackStandardId,
+          ambient_temperature_celsius: ambientSetup.temperature_c,
+          relative_humidity_pct: ambientSetup.humidity_pct,
+          atmospheric_pressure_hpa: ambientSetup.pressure_hpa,
+          technical_checklist: {
+            level_indicator_present: true,
+            zero_setting_operative: true,
+            tare_device_operative: true,
+            security_sealing_intact: true,
+            audit_counter_value: 'AC-0001',
+            notes: 'Explicit draft evaluation saved by tester'
+          },
+          conducted_by: user?.id
+        });
+        const validId: string = draft.id;
+        activeId = validId;
+        setReportId(validId);
+        setLoadedReportNumber(draft.report_number);
+        if (typeof window !== 'undefined') {
+          const url = new URL(window.location.href);
+          url.searchParams.set('reportId', validId);
+          window.history.replaceState({}, '', url.toString());
+          window.localStorage.setItem('metrix76_active_report_id', validId);
+        }
+      }
+
+      if (!activeId) return null;
+      const targetId: string = activeId;
+
+      const weighingObservations: ReportObservationInput[] = points.map((point, index) => ({
+        test_type: 'WEIGHING',
+        direction: point.direction,
+        sequence_order: index + 1,
+        load_applied: point.load_applied,
+        indication_observed: point.indication_observed,
+        delta_load: point.delta_load,
+        position_tag: 'CENTER',
+      }));
+
+      const repeatabilityObservations: ReportObservationInput[] = repeatabilityData.flatMap((series, sIdx) =>
+        series.readings.map((reading, rIdx) => ({
+          test_type: 'REPEATABILITY' as const,
+          direction: 'STATIC' as const,
+          sequence_order: (sIdx + 1) * 100 + (rIdx + 1),
+          load_applied: series.nominalLoad,
+          indication_observed: reading,
+          delta_load: 0,
+          position_tag: 'CENTER',
+          run_cycle: sIdx + 1,
+        }))
+      );
+
+      const eccentricityObservations: ReportObservationInput[] = eccentricityPoints.map((point, index) => ({
+        test_type: 'ECCENTRICITY' as const,
+        direction: 'STATIC' as const,
+        sequence_order: 1000 + (index + 1),
+        load_applied: point.load_applied,
+        indication_observed: point.indication_observed,
+        delta_load: point.delta_load,
+        position_tag: point.position_tag,
+      }));
+
+      const tareZeroObservations: ReportObservationInput[] = [
+        {
+          test_type: 'TARE_ZERO' as const,
+          direction: 'STATIC' as const,
+          sequence_order: 2001,
+          load_applied: 0,
+          indication_observed: tareZeroState.zeroSetting,
+          delta_load: 0,
+          position_tag: 'ZERO_SETTING',
+        },
+        {
+          test_type: 'TARE_ZERO' as const,
+          direction: 'STATIC' as const,
+          sequence_order: 2002,
+          load_applied: 0,
+          indication_observed: tareZeroState.zeroTracking,
+          delta_load: 0,
+          position_tag: 'ZERO_TRACKING',
+        },
+        {
+          test_type: 'TARE_ZERO' as const,
+          direction: 'STATIC' as const,
+          sequence_order: 2003,
+          load_applied: 0,
+          indication_observed: tareZeroState.tareBalancing,
+          delta_load: 0,
+          position_tag: 'TARE_BALANCING',
+        },
+      ];
+
+      await upsertReportObservations(targetId, {
+        report_id: targetId,
+        observations: [
+          ...weighingObservations,
+          ...repeatabilityObservations,
+          ...eccentricityObservations,
+          ...tareZeroObservations,
+        ]
+      });
+
+      await fetchDiagnostics(targetId);
+      try {
+        const updatedPlan = await getTestPlan(targetId);
+        if (updatedPlan?.plan) {
+          setTestPlan(updatedPlan.plan);
+        }
+      } catch {
+        // plan not yet generated
+      }
+      setDraftSavedToast(`Draft saved to database successfully!`);
+      setTimeout(() => setDraftSavedToast(null), 4000);
+      return targetId;
+    } catch (e: any) {
+      console.warn('Draft save failed:', e);
+      alert(`Could not save draft: ${e.message || 'Server error'}`);
+      return null;
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
+  const handleSyncToDraft = async (): Promise<string | null> => {
+    if (!reportId) {
+      // STRICT: Never auto-create draft in database unless tester clicked save
+      return null;
+    }
+    return handleSaveDraftToDatabase();
+  };
+
+  const handleStartNewEvaluation = () => {
+    if (confirm('Start a new blank evaluation? The active draft remains saved in the database work queue.')) {
+      setReportId(null);
+      setLoadedReportNumber(null);
+      setTestPlan(null);
+      setTestPlanDiff(null);
+      setFailureData(null);
+      setIntegrityResult(null);
+      setPoints(defaultPoints);
+      setRepeatabilityData(createRepeatabilitySeries(15));
+      setEccentricityPoints(defaultEccentricityPoints);
+      setWizardStep(1);
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem('metrix76_active_report_id');
+        window.localStorage.removeItem(STORAGE_KEY);
+        const url = new URL(window.location.href);
+        url.searchParams.delete('reportId');
+        window.history.replaceState({}, '', url.pathname);
+      }
+    }
+  };
+
+  const [deletingActiveDraft, setDeletingActiveDraft] = useState<boolean>(false);
+
+  const handleDeleteActiveDraft = async () => {
+    if (!reportId) return;
+    const name = loadedReportNumber || reportId;
+    if (!confirm(`Are you sure you want to permanently delete draft "${name}"? This action cannot be undone.`)) {
+      return;
+    }
+    setDeletingActiveDraft(true);
+    try {
+      await deleteReportDraft(reportId);
+      setDraftSavedToast(`Draft "${name}" deleted successfully.`);
+      setTimeout(() => setDraftSavedToast(null), 4000);
+      setReportId(null);
+      setLoadedReportNumber(null);
+      setTestPlan(null);
+      setTestPlanDiff(null);
+      setFailureData(null);
+      setIntegrityResult(null);
+      setPoints(defaultPoints);
+      setRepeatabilityData(createRepeatabilitySeries(15));
+      setEccentricityPoints(defaultEccentricityPoints);
+      setWizardStep(1);
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem('metrix76_active_report_id');
+        window.localStorage.removeItem(STORAGE_KEY);
+        const url = new URL(window.location.href);
+        url.searchParams.delete('reportId');
+        window.history.replaceState({}, '', url.pathname);
+      }
+    } catch (e: any) {
+      console.error('Failed to delete active draft:', e);
+      alert(`Could not delete draft: ${e.message || 'Server error'}`);
+    } finally {
+      setDeletingActiveDraft(false);
+    }
+  };
+
+  const fetchOrGeneratePlan = async (forceRegenerate: boolean = false) => {
+    let activeId = reportId;
+    if (!activeId) {
+      // Tester explicitly clicked Generate Test Plan
+      activeId = await handleSaveDraftToDatabase();
+    }
+    if (!activeId) {
+      setTestPlanError('A valid report draft is required before generating an OIML test plan.');
+      return;
+    }
+
+    setTestPlanLoading(true);
+    setTestPlanError(null);
+    try {
+      if (forceRegenerate) {
+        const res = await regenerateTestPlan(activeId);
+        setTestPlan(res.plan);
+        setTestPlanDiff(res.diff ?? null);
+      } else {
+        try {
+          const existing = await getTestPlan(activeId);
+          if (existing?.plan) {
+            setTestPlan(existing.plan);
+          }
+          setTestPlanDiff(null);
+        } catch {
+          const generated = await generateTestPlan(activeId);
+          setTestPlan(generated.plan);
+          setTestPlanDiff(null);
+        }
+      }
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || err.message || 'Failed to generate test plan';
+      setTestPlanError(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    } finally {
+      setTestPlanLoading(false);
+    }
+  };
+
+  const handleVerifyIntegrity = async () => {
+    let activeId = reportId;
+    if (!activeId) {
+      activeId = await handleSaveDraftToDatabase();
+    }
+    if (activeId) {
+      try {
+        setVerifyingIntegrity(true);
+        const res = await verifyReportIntegrity(activeId);
+        setIntegrityResult(res);
+      } catch (e) {
+        console.error('Integrity verification failed:', e);
+      } finally {
+        setVerifyingIntegrity(false);
+      }
+    }
+  };
+
+  const handleOpenLedger = async () => {
+    let activeId = reportId;
+    if (!activeId) {
+      activeId = await handleSaveDraftToDatabase();
+    }
+    if (activeId) {
+      try {
+        const entries = await getIntegrityEntries(activeId);
+        setLedgerEntries(entries);
+        setIsLedgerOpen(true);
+      } catch (e) {
+        console.error('Failed to load ledger entries:', e);
+      }
+    }
+  };
+
+  // URL / Server Report Hydration
+  useEffect(() => {
+    if (!reportId) return;
+
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('metrix76_active_report_id', reportId);
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('reportId') !== reportId) {
+        url.searchParams.set('reportId', reportId);
+        window.history.replaceState({}, '', url.toString());
+      }
+    }
+
+    let isMounted = true;
+    getReportDetail(reportId)
+      .then((detail) => {
+        if (!isMounted || !detail) return;
+        setLoadedReportNumber(detail.report_number || null);
+
+        if (detail.instrument) {
+          const inst = detail.instrument;
+          setInstrumentId(inst.id || detail.instrument_id);
+          setInstrument({
+            accuracy_class: inst.accuracy_class,
+            max_capacity: Number(inst.max_capacity),
+            min_capacity: Number(inst.min_capacity),
+            scale_interval_d: Number(inst.scale_interval_d),
+            verification_interval_e: Number(inst.verification_interval_e),
+            unit: inst.unit || 'kg',
+            is_multi_interval: Boolean(inst.is_multi_interval),
+          });
+        }
+
+        setAmbientSetup((prev) => ({
+          ...prev,
+          temperature_c: detail.ambient_temperature_celsius ?? prev.temperature_c,
+          humidity_pct: detail.relative_humidity_pct ?? prev.humidity_pct,
+          pressure_hpa: detail.atmospheric_pressure_hpa ?? prev.pressure_hpa,
+          reference_standard: detail.reference_standard?.set_identifier ?? prev.reference_standard,
+        }));
+
+        if (Array.isArray(detail.test_observations) && detail.test_observations.length > 0) {
+          const weighObs = detail.test_observations.filter((o: any) => o.test_type === 'WEIGHING');
+          if (weighObs.length > 0) {
+            setPoints(weighObs.map((o: any) => ({
+              load_applied: Number(o.load_applied),
+              indication_observed: Number(o.indication_observed),
+              delta_load: Number(o.delta_load || 0),
+              direction: o.direction || 'INCREASING',
+            })));
+          }
+
+          const repObs = detail.test_observations.filter((o: any) => o.test_type === 'REPEATABILITY');
+          if (repObs.length > 0) {
+            const seriesMap: Record<number, number[]> = {};
+            repObs.forEach((o: any) => {
+              const cycle = o.run_cycle || 1;
+              if (!seriesMap[cycle]) seriesMap[cycle] = [];
+              seriesMap[cycle].push(Number(o.indication_observed));
+            });
+            const seriesList = Object.entries(seriesMap).map(([cycle, readings], idx) => ({
+              id: `series-${cycle}`,
+              label: `Series ${idx + 1} (${repObs[0]?.load_applied || 15} kg)`,
+              nominalLoad: Number(repObs[0]?.load_applied || 15),
+              readings: readings.length >= 10 ? readings : [...readings, ...Array(10 - readings.length).fill(0)],
+            }));
+            if (seriesList.length > 0) {
+              setRepeatabilityData(seriesList);
+            }
+          }
+
+          const eccObs = detail.test_observations.filter((o: any) => o.test_type === 'ECCENTRICITY');
+          if (eccObs.length > 0) {
+            setEccentricityPoints(eccObs.map((o: any) => ({
+              position_tag: o.position_tag || 'CENTER',
+              load_applied: Number(o.load_applied),
+              indication_observed: Number(o.indication_observed),
+              delta_load: Number(o.delta_load || 0),
+            })));
+          }
+        }
+
+        getTestPlan(reportId)
+          .then((res) => {
+            if (isMounted && res?.plan) {
+              setTestPlan(res.plan);
+            }
+          })
+          .catch(() => {});
+      })
+      .catch((err) => {
+        console.warn(`Failed to hydrate draft report ${reportId}:`, err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [reportId]);
+
+  useEffect(() => {
+    if (wizardStep === 3) {
+      if (reportId && !testPlan && !testPlanLoading) {
+        fetchOrGeneratePlan(false);
+      }
+    } else if (wizardStep === 5) {
+      if (reportId) {
+        fetchDiagnostics(reportId);
+      }
+    }
+  }, [wizardStep, reportId]);
+
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const draftPayload = {
@@ -250,14 +791,17 @@ export default function EvaluationsPage() {
         activeTab,
         wizardStep,
         instrumentId,
+        instrumentSourceMode,
         reportId,
+        testPlan,
         savedAt: new Date().toISOString(),
       };
       const storageKey = getDraftStorageKey(reportId);
       window.localStorage.setItem(storageKey, JSON.stringify(draftPayload));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(draftPayload));
 
-      if (!reportId) {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(draftPayload));
+      if (reportId) {
+        window.localStorage.setItem('metrix76_active_report_id', reportId);
       }
     }
   }, [
@@ -270,14 +814,29 @@ export default function EvaluationsPage() {
     activeTab,
     wizardStep,
     instrumentId,
+    instrumentSourceMode,
     reportId,
+    testPlan,
   ]);
 
   useEffect(() => {
     listInstruments()
       .then((instruments) => {
+        setAvailableInstruments(instruments);
         if (instruments.length > 0) {
-          setInstrumentId(instruments[0].id);
+          const match = instruments.find((i) => i.id === instrumentId) ?? instruments[0];
+          setInstrumentId(match.id);
+          if (!savedDraft?.instrument) {
+            setInstrument({
+              accuracy_class: match.accuracy_class,
+              max_capacity: Number(match.max_capacity),
+              min_capacity: Number(match.min_capacity),
+              scale_interval_d: Number(match.scale_interval_d),
+              verification_interval_e: Number(match.verification_interval_e),
+              unit: match.unit || 'kg',
+              is_multi_interval: Boolean(match.is_multi_interval),
+            });
+          }
         }
       })
       .catch((error) => console.error('Instrument lookup error:', error));
@@ -666,14 +1225,177 @@ export default function EvaluationsPage() {
 
   const renderWizardStepContent = () => {
     if (wizardStep === 1) {
+      const selectedRegistered = availableInstruments.find((i) => i.id === instrumentId) ?? null;
+
       return (
-        <div className="bg-white p-6 sm:p-8 border border-editorial-border shadow-editorial space-y-5">
-          <div className="flex items-center justify-between border-b border-editorial-border pb-3">
+        <div className="bg-white p-6 sm:p-8 border border-editorial-border shadow-editorial space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-editorial-border pb-4 gap-3">
             <div>
               <h3 className="font-display font-bold text-base uppercase text-ink-950">STEP 1 • INSTRUMENT PASSPORT</h3>
-              <p className="text-[11px] font-mono text-ink-500 uppercase tracking-wider mt-0.5">Capture the scale configuration for the live test packet.</p>
+              <p className="text-[11px] font-mono text-ink-500 uppercase tracking-wider mt-0.5">Select a registered instrument passport from the vault or enter custom specifications.</p>
+            </div>
+            <div className="flex items-center gap-1.5 bg-alabaster-50 p-1 border border-editorial-border">
+              <button
+                type="button"
+                onClick={() => {
+                  setInstrumentSourceMode('REGISTERED');
+                  if (availableInstruments.length > 0) {
+                    const match = availableInstruments.find((i) => i.id === instrumentId) ?? availableInstruments[0];
+                    handleSelectRegisteredInstrument(match.id);
+                  }
+                }}
+                className={`px-3 py-1.5 text-[10px] font-mono font-bold uppercase tracking-wider transition-colors cursor-pointer ${
+                  instrumentSourceMode === 'REGISTERED'
+                    ? 'bg-ink-950 text-white shadow-xs'
+                    : 'text-ink-600 hover:text-ink-950'
+                }`}
+              >
+                REGISTERED PASSPORT
+              </button>
+              <button
+                type="button"
+                onClick={() => setInstrumentSourceMode('CUSTOM')}
+                className={`px-3 py-1.5 text-[10px] font-mono font-bold uppercase tracking-wider transition-colors cursor-pointer ${
+                  instrumentSourceMode === 'CUSTOM'
+                    ? 'bg-ink-950 text-white shadow-xs'
+                    : 'text-ink-600 hover:text-ink-950'
+                }`}
+              >
+                CUSTOM / AD-HOC
+              </button>
             </div>
           </div>
+
+          {/* Draft Persistence Status & Action Bar */}
+          <div className={`p-4 border text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+            reportId ? 'bg-emerald-50/40 border-emerald-300' : 'bg-amber-50/50 border-amber-300'
+          }`}>
+            <div className="flex items-center gap-2.5">
+              {reportId ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <Info className="w-4 h-4 text-amber-600 shrink-0" />
+              )}
+              <div>
+                <span className="font-bold uppercase tracking-wider text-[11px] text-ink-950">
+                  {reportId ? `ACTIVE DATABASE DRAFT: ${loadedReportNumber || reportId}` : 'LOCAL WORKSPACE (UNSAVED DRAFT)'}
+                </span>
+                <p className="text-[10px] text-ink-600 mt-0.5">
+                  {reportId
+                    ? 'This draft is officially registered in Supabase and appears in your Technical Testing Queue.'
+                    : 'Unless you explicitly click "Save Draft To Database", no database record will be created.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {reportId ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveDraftToDatabase()}
+                    disabled={savingDraft || deletingActiveDraft}
+                    className="px-3 py-1.5 bg-ink-950 hover:bg-neutral-800 disabled:opacity-50 text-white font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer"
+                  >
+                    {savingDraft ? 'SYNCING...' : 'SYNC OBSERVATIONS'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeleteActiveDraft}
+                    disabled={deletingActiveDraft}
+                    className="px-3 py-1.5 bg-white hover:bg-rose-50 border border-editorial-border hover:border-rose-300 text-rose-700 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1"
+                    title="Permanently delete active draft"
+                  >
+                    {deletingActiveDraft ? (
+                      <span className="w-3 h-3 border-2 border-rose-600 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3 h-3" />
+                    )}
+                    <span>DELETE DRAFT</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartNewEvaluation}
+                    disabled={deletingActiveDraft}
+                    className="px-3 py-1.5 bg-white hover:bg-alabaster-100 border border-editorial-border text-ink-900 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer"
+                  >
+                    + NEW EVALUATION
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleSaveDraftToDatabase()}
+                  disabled={savingDraft}
+                  className="px-4 py-2 bg-ink-950 hover:bg-neutral-800 disabled:opacity-50 text-white font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer shadow-editorial flex items-center gap-1.5"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{savingDraft ? 'SAVING DRAFT...' : 'SAVE DRAFT TO DATABASE'}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {instrumentSourceMode === 'REGISTERED' ? (
+            <div className="bg-alabaster-50 border border-editorial-border p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <label className="text-[10px] font-mono font-bold text-ink-700 uppercase tracking-widest block">
+                  CHOOSE REGISTERED INSTRUMENT FROM VAULT:
+                </label>
+                <Link
+                  href="/instruments"
+                  target="_blank"
+                  className="text-[10px] font-mono font-bold text-ink-600 hover:text-ink-950 underline uppercase flex items-center gap-1"
+                >
+                  <span>+ OPEN INSTRUMENTS REGISTRY ↗</span>
+                </Link>
+              </div>
+
+              <select
+                value={instrumentId}
+                onChange={(e) => handleSelectRegisteredInstrument(e.target.value)}
+                className="w-full bg-white border border-editorial-border px-3.5 py-2.5 text-xs font-mono text-ink-950 outline-none focus:border-ink-950 font-bold"
+              >
+                {availableInstruments.length === 0 ? (
+                  <option value="">Loading registered instruments from vault...</option>
+                ) : (
+                  availableInstruments.map((inst) => (
+                    <option key={inst.id} value={inst.id}>
+                      {inst.model_name} — {inst.manufacturer_name} (SN: {inst.serial_number}) • {inst.accuracy_class} • Max: {inst.max_capacity} {inst.unit}
+                    </option>
+                  ))
+                )}
+              </select>
+
+              {selectedRegistered && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 text-[11px] font-mono text-ink-700 border-t border-editorial-border">
+                  <div>
+                    <span className="text-[9px] text-ink-400 uppercase block">MODEL & MAKE</span>
+                    <strong className="text-ink-950 font-bold">{selectedRegistered.model_name} ({selectedRegistered.manufacturer_name})</strong>
+                  </div>
+                  <div>
+                    <span className="text-[9px] text-ink-400 uppercase block">SERIAL NUMBER</span>
+                    <strong className="text-ink-950 font-bold">{selectedRegistered.serial_number}</strong>
+                  </div>
+                  <div>
+                    <span className="text-[9px] text-ink-400 uppercase block">RESOLUTION n (Max/e)</span>
+                    <strong className="text-ink-950 font-bold">
+                      {selectedRegistered.calculated_n?.toLocaleString() ??
+                        Math.round(selectedRegistered.max_capacity / selectedRegistered.verification_interval_e).toLocaleString()}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-[9px] text-ink-400 uppercase block">INTERVAL TYPE</span>
+                    <strong className="text-ink-950 font-bold">{selectedRegistered.is_multi_interval ? 'Multi-Interval' : 'Single Interval'}</strong>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="bg-amber-50/60 border border-amber-200 p-3 text-xs font-mono text-amber-900 flex items-center justify-between">
+              <span><strong>CUSTOM SPECIFICATION MODE:</strong> You are entering ad-hoc scale parameters for testing without binding to a registered passport.</span>
+            </div>
+          )}
 
           <div className="grid md:grid-cols-2 gap-4">
             <label className="text-[10px] font-mono font-bold text-ink-600 uppercase tracking-widest">
@@ -700,7 +1422,7 @@ export default function EvaluationsPage() {
             </label>
 
             <label className="text-[10px] font-mono font-bold text-ink-600 uppercase tracking-widest">
-              MAX CAPACITY (kg)
+              MAX CAPACITY ({instrument.unit})
               <input
                 type="number"
                 step="any"
@@ -711,7 +1433,7 @@ export default function EvaluationsPage() {
             </label>
 
             <label className="text-[10px] font-mono font-bold text-ink-600 uppercase tracking-widest">
-              MIN CAPACITY (kg)
+              MIN CAPACITY ({instrument.unit})
               <input
                 type="number"
                 step="any"
@@ -722,7 +1444,7 @@ export default function EvaluationsPage() {
             </label>
 
             <label className="text-[10px] font-mono font-bold text-ink-600 uppercase tracking-widest">
-              INTERVAL d (kg)
+              INTERVAL d ({instrument.unit})
               <input
                 type="number"
                 step="any"
@@ -733,7 +1455,7 @@ export default function EvaluationsPage() {
             </label>
 
             <label className="text-[10px] font-mono font-bold text-ink-600 uppercase tracking-widest">
-              VERIFICATION INTERVAL e (kg)
+              VERIFICATION INTERVAL e ({instrument.unit})
               <input
                 type="number"
                 step="any"
@@ -838,25 +1560,116 @@ export default function EvaluationsPage() {
     }
 
     if (wizardStep === 3) {
+      const effectivePlan = testPlan
+        ? {
+            ...testPlan,
+            status: isPlanStale ? ('STALE' as const) : testPlan.status,
+          }
+        : null;
+
+      return (
+        <div className="space-y-4">
+          {!reportId && (
+            <div className="bg-amber-50/70 border border-amber-300 p-4 text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-editorial">
+              <div className="flex items-center gap-2">
+                <Info className="w-4 h-4 text-amber-700 shrink-0" />
+                <div>
+                  <span className="text-amber-950 font-bold uppercase tracking-wider text-[11px] block">
+                    WORKSPACE NOT YET SAVED AS DRAFT
+                  </span>
+                  <span className="text-ink-600 text-[10px]">
+                    Clicking &quot;Generate Test Plan&quot; below will save an official evaluation draft in your Technical Testing Queue and configure OIML tests.
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleSaveDraftToDatabase()}
+                disabled={savingDraft}
+                className="px-3.5 py-1.5 bg-ink-950 hover:bg-neutral-800 disabled:opacity-50 text-white text-[10px] font-mono font-bold uppercase tracking-wider shrink-0 cursor-pointer shadow-xs"
+              >
+                {savingDraft ? 'SAVING...' : 'SAVE DRAFT NOW'}
+              </button>
+            </div>
+          )}
+
+          <TestPlanPanel
+            plan={effectivePlan}
+            loading={testPlanLoading}
+            error={testPlanError}
+            diff={testPlanDiff}
+            instrument={instrument}
+            referenceStandard={selectedStandard}
+            onGenerate={() => fetchOrGeneratePlan(false)}
+            onRegenerate={() => fetchOrGeneratePlan(true)}
+            onSelectTest={(testType) => {
+              if (testType === 'WEIGHING') setActiveTab('A_WEIGHING');
+              else if (testType === 'REPEATABILITY') setActiveTab('B_REPEATABILITY');
+              else if (testType === 'ECCENTRICITY') setActiveTab('C_ECCENTRICITY');
+              else if (testType === 'TARE_ZERO') setActiveTab('D_TARE_ZERO');
+              setWizardStep(4);
+            }}
+            onAcceptPlan={() => setWizardStep(4)}
+          />
+        </div>
+      );
+    }
+
+    if (wizardStep === 4) {
+      const defaultTabs: { key: WorksheetTab; label: string; clause: string }[] = [
+        { key: 'A_WEIGHING', label: 'Weighing', clause: 'Clause A.4.4' },
+        { key: 'B_REPEATABILITY', label: 'Repeatability', clause: 'Clause A.4.10' },
+        { key: 'C_ECCENTRICITY', label: 'Eccentricity', clause: 'Clause A.4.7' },
+        { key: 'D_TARE_ZERO', label: 'Tare & Zero', clause: 'Clauses A.4.2 & A.4.6' },
+      ];
+
       return (
         <div className="space-y-6">
-          <div className="bg-white p-3 border border-editorial-border flex flex-wrap gap-2 shadow-editorial">
-            {[
-              ['A_WEIGHING', 'Clause A.4.4: Weighing'],
-              ['B_REPEATABILITY', 'Clause A.4.10: Repeatability'],
-              ['C_ECCENTRICITY', 'Clause A.4.7: Eccentricity'],
-              ['D_TARE_ZERO', 'Clauses A.4.2 & A.4.6'],
-            ].map(([key, label]) => (
+          <div className="bg-white p-3 border border-editorial-border flex flex-wrap gap-2 shadow-editorial items-center justify-between">
+            <div className="flex flex-wrap gap-2">
+              {defaultTabs.map(({ key, label, clause }) => {
+                const planItem = testPlan?.items?.find((i) => {
+                  if (key === 'A_WEIGHING') return i.test_type === 'WEIGHING';
+                  if (key === 'B_REPEATABILITY') return i.test_type === 'REPEATABILITY';
+                  if (key === 'C_ECCENTRICITY') return i.test_type === 'ECCENTRICITY';
+                  if (key === 'D_TARE_ZERO') return i.test_type === 'TARE_ZERO';
+                  return false;
+                });
+
+                const isBlocked = planItem?.execution_status === 'BLOCKED';
+                const isCompleted = planItem?.execution_status === 'COMPLETED';
+
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setActiveTab(key)}
+                    className={`px-4 py-2 text-xs font-mono font-bold uppercase tracking-wider transition-all cursor-pointer flex items-center gap-2 ${
+                      activeTab === key
+                        ? 'bg-ink-950 text-white shadow-editorial'
+                        : 'bg-alabaster-50 border border-editorial-border text-ink-700 hover:bg-alabaster-100'
+                    }`}
+                  >
+                    <span>{clause}: {label}</span>
+                    {isCompleted && (
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" title="Completed" />
+                    )}
+                    {isBlocked && (
+                      <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" title="Blocked" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {testPlan && (
               <button
-                key={key}
-                onClick={() => setActiveTab(key as WorksheetTab)}
-                className={`px-4 py-2 text-xs font-mono font-bold uppercase tracking-wider transition-all cursor-pointer ${
-                  activeTab === key ? 'bg-ink-950 text-white shadow-editorial' : 'bg-alabaster-50 border border-editorial-border text-ink-700 hover:bg-alabaster-100'
-                }`}
+                type="button"
+                onClick={() => setWizardStep(3)}
+                className="text-[11px] font-mono text-ink-500 hover:text-ink-950 uppercase flex items-center gap-1 border border-editorial-border px-3 py-1.5 bg-alabaster-50 hover:bg-alabaster-100 cursor-pointer"
               >
-                {label}
+                <span>← VIEW TEST PLAN ({testPlan.items.filter((i) => i.execution_status === 'COMPLETED').length}/{testPlan.items.filter((i) => i.applicable).length} DONE)</span>
               </button>
-            ))}
+            )}
           </div>
 
           {renderWorksheetShell()}
@@ -864,13 +1677,15 @@ export default function EvaluationsPage() {
       );
     }
 
-    if (wizardStep === 4) {
+    if (wizardStep === 5) {
+      const isCompliant = evaluation?.overall_compliant && (!failureData || failureData.failed_observations === 0);
+
       return (
         <div className="bg-white p-6 sm:p-8 border border-editorial-border shadow-editorial space-y-6">
           <div className="flex items-center justify-between border-b border-editorial-border pb-3">
             <div>
-              <h3 className="font-display font-bold text-base uppercase text-ink-950">STEP 4 • REVIEW SUMMARY</h3>
-              <p className="text-[11px] font-mono text-ink-500 uppercase tracking-wider mt-0.5">Final sign-off review before the draft is submitted for approval.</p>
+              <h3 className="font-display font-bold text-base uppercase text-ink-950">STEP 5 • REVIEW SUMMARY</h3>
+              <p className="text-[11px] font-mono text-ink-500 uppercase tracking-wider mt-0.5">Authoritative OIML R 76 evaluation verdict, test plan progress, clause failure analysis, and tamper-evident cryptographic evidence ledger.</p>
             </div>
             {submissionState === 'submitted' && (
               <span className="bg-ink-950 text-white px-3 py-1 text-[10px] font-mono font-bold uppercase tracking-wider">
@@ -879,25 +1694,273 @@ export default function EvaluationsPage() {
             )}
           </div>
 
+          {/* Test Plan Status & Progress Card */}
+          {testPlan && (
+            <div className="border border-editorial-border bg-alabaster-50 p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 border-b border-editorial-border gap-2">
+                <div className="flex items-center gap-2">
+                  <ClipboardList className="w-4 h-4 text-ink-950" />
+                  <span className="font-display font-bold text-xs uppercase text-ink-950 tracking-wider">
+                    AUTOMATIC OIML TEST PLAN PROGRESS
+                  </span>
+                  <span className="text-[10px] font-mono text-ink-500 bg-white px-2 py-0.5 border border-editorial-border">
+                    {testPlan.rule_set_version}
+                  </span>
+                </div>
+                <div className="text-[10px] font-mono font-bold uppercase text-ink-900">
+                  {testPlan.items.filter((i) => i.execution_status === 'COMPLETED').length} / {testPlan.items.filter((i) => i.applicable).length} PROCEDURES COMPLETED
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {testPlan.items.map((item) => (
+                  <div key={item.id} className="bg-white border border-editorial-border p-2.5 text-xs font-mono space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-ink-400 font-bold">{String(item.sequence_order).padStart(2, '0')}</span>
+                      <span className={`px-1.5 py-0.2 uppercase text-[9px] font-bold border ${
+                        item.execution_status === 'COMPLETED'
+                          ? 'bg-ink-950 text-white border-ink-950'
+                          : item.execution_status === 'READY'
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                          : item.execution_status === 'BLOCKED'
+                          ? 'bg-rose-50 text-rose-800 border-rose-300'
+                          : 'bg-neutral-100 text-neutral-600 border-neutral-300'
+                      }`}>
+                        {item.execution_status}
+                      </span>
+                    </div>
+                    <div className="font-bold text-ink-950 truncate uppercase text-[11px]">
+                      {item.title}
+                    </div>
+                    <div className="text-[9px] text-ink-500 truncate">
+                      {item.standard_reference}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Overview Cards */}
           <div className="grid md:grid-cols-3 gap-4">
             <div className="border border-editorial-border p-4 bg-alabaster-50">
-              <div className="text-[10px] font-mono uppercase tracking-widest text-ink-400">INSTRUMENT</div>
+              <div className="text-[10px] font-mono uppercase tracking-widest text-ink-400">INSTRUMENT PASSPORT</div>
               <div className="mt-2 font-display font-bold text-lg text-ink-950">{instrument.accuracy_class}</div>
-              <div className="text-xs font-mono text-ink-600">{instrument.max_capacity} kg max</div>
+              <div className="text-xs font-mono text-ink-600">{instrument.max_capacity} kg max • e={instrument.verification_interval_e} kg</div>
             </div>
 
             <div className="border border-editorial-border p-4 bg-alabaster-50">
-              <div className="text-[10px] font-mono uppercase tracking-widest text-ink-400">AMBIENT</div>
+              <div className="text-[10px] font-mono uppercase tracking-widest text-ink-400">AMBIENT ENVIRONMENT</div>
               <div className="mt-2 font-display font-bold text-lg text-ink-950">{ambientSetup.temperature_c} °C</div>
-              <div className="text-xs font-mono text-ink-600">{ambientSetup.humidity_pct}% RH / {ambientSetup.pressure_hpa} hPa</div>
+              <div className="text-xs font-mono text-ink-600">{ambientSetup.humidity_pct}% RH • {ambientSetup.pressure_hpa} hPa</div>
             </div>
 
-            <div className="border border-editorial-border p-4 bg-alabaster-50">
-              <div className="text-[10px] font-mono uppercase tracking-widest text-ink-400">OVERALL RESULT</div>
-              <div className="mt-2 font-display font-bold text-lg text-ink-950">
-                {evaluation?.overall_compliant ? 'COMPLIANT' : 'CHECK REQUIRED'}
+            <div className={`border p-4 ${isCompliant ? 'border-emerald-300 bg-emerald-50/40' : 'border-rose-300 bg-rose-50/40'}`}>
+              <div className="text-[10px] font-mono uppercase tracking-widest text-ink-400">COMPLIANCE VERDICT</div>
+              <div className={`mt-2 font-display font-bold text-lg ${isCompliant ? 'text-emerald-800' : 'text-rose-700'}`}>
+                {isCompliant ? 'PASS • COMPLIANT' : 'FAIL • NON-COMPLIANT'}
               </div>
-              <div className="text-xs font-mono text-ink-600">{ambientSetup.reference_standard}</div>
+              <div className="text-xs font-mono text-ink-600">Standard: {ambientSetup.reference_standard}</div>
+            </div>
+          </div>
+
+          {/* 1. Clause-Level Failure Explanation Section */}
+          {!isCompliant ? (
+            <div className="border border-rose-300 bg-rose-50/40 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-rose-200 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <ShieldAlert className="w-5 h-5 text-rose-600" />
+                  <div>
+                    <h4 className="font-display font-bold text-sm uppercase text-rose-950">
+                      CLAUSE-LEVEL FAILURE EXPLANATION
+                    </h4>
+                    <p className="text-[10px] font-mono text-rose-700 uppercase tracking-wider mt-0.5">
+                      {failureData
+                        ? `${failureData.failed_tests} FAILED TEST MODULES • ${failureData.failed_observations} NON-COMPLIANT OBSERVATIONS`
+                        : 'TEST EVALUATION EXCEEDS STATUTORY TOLERANCE LIMITS'}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (reportId) fetchDiagnostics(reportId);
+                    else handleSyncToDraft();
+                  }}
+                  disabled={loadingExplanations}
+                  className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider bg-white border border-rose-300 text-rose-800 px-3 py-1.5 hover:bg-rose-100 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loadingExplanations ? 'animate-spin' : ''}`} />
+                  <span>REFRESH DIAGNOSTICS</span>
+                </button>
+              </div>
+
+              {/* Explanations List */}
+              <div className="space-y-3">
+                {failureData?.explanations && failureData.explanations.length > 0 ? (
+                  failureData.explanations.map((expl) => (
+                    <div key={expl.id} className="bg-white border border-rose-200 p-4 space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-xs text-rose-950 uppercase font-mono">{expl.title}</span>
+                            <span className="text-[9px] font-mono px-2 py-0.5 bg-rose-100 text-rose-800 border border-rose-300 uppercase">
+                              {expl.test_type}
+                            </span>
+                          </div>
+                          <p className="text-xs text-ink-800 font-sans leading-relaxed">
+                            {expl.summary}
+                          </p>
+                          <div className="text-[10px] font-mono text-ink-500">
+                            Clause: <span className="font-bold">{expl.clause_reference || 'Applicable rule reference is not configured.'}</span>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedExplanation(expl);
+                            setIsDetailOpen(true);
+                          }}
+                          className="shrink-0 bg-ink-950 hover:bg-neutral-800 text-white text-[10px] font-mono font-bold uppercase tracking-wider px-3.5 py-2 transition-colors cursor-pointer"
+                        >
+                          VIEW DETAILS
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="bg-white border border-rose-200 p-4 text-xs font-mono text-ink-600 flex items-center justify-between">
+                    <span>Synchronizing authoritative observation calculations to extract clause explanations...</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSyncToDraft()}
+                      className="text-[10px] font-mono font-bold uppercase underline text-rose-700"
+                    >
+                      SYNC NOW
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="border border-emerald-300 bg-emerald-50/50 p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                <div>
+                  <h4 className="font-display font-bold text-xs uppercase text-emerald-950">COMPLIANCE CRITERIA MET (PASS)</h4>
+                  <p className="text-[11px] font-mono text-emerald-800 mt-0.5">
+                    All test observations fall strictly within statutory OIML R 76-1 Table 6 Maximum Permissible Error tolerances.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 2. Cryptographic Data Integrity Section */}
+          <div className="border border-editorial-border bg-alabaster-50 p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-editorial-border pb-3">
+              <div className="flex items-center gap-2.5">
+                <Database className="w-5 h-5 text-ink-900" />
+                <div>
+                  <h4 className="font-display font-bold text-sm uppercase text-ink-950">
+                    CRYPTOGRAPHIC RAW-DATA LEDGER (ISO/IEC 17025)
+                  </h4>
+                  <p className="text-[10px] font-mono text-ink-500 uppercase tracking-wider mt-0.5">
+                    TAMPER-EVIDENT SHA-256 HASH CHAIN • ED25519 CHECKPOINT SEAL
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                {integrityResult && (
+                  <span className={`px-2.5 py-1 text-[10px] font-mono font-bold uppercase tracking-wider border flex items-center gap-1.5 ${
+                    integrityResult.status === 'INTACT'
+                      ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                      : 'bg-rose-100 text-rose-900 border-rose-300'
+                  }`}>
+                    {integrityResult.status === 'INTACT' ? <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" /> : <ShieldAlert className="w-3.5 h-3.5 text-rose-700" />}
+                    {integrityResult.status}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Tampering Detection Alert */}
+            {integrityResult && integrityResult.status !== 'INTACT' && integrityResult.status !== 'NOT_VERIFIED' && (
+              <div className="p-4 border border-rose-300 bg-rose-50 space-y-2 font-mono">
+                <div className="flex items-center gap-2 text-rose-900 font-bold text-xs uppercase">
+                  <ShieldAlert className="w-4 h-4 text-rose-700 shrink-0" />
+                  <span>⚠ CRYPTOGRAPHIC INTEGRITY CHECK FAILED: {integrityResult.status}</span>
+                </div>
+                {integrityResult.first_failure && (
+                  <div className="text-xs text-rose-800 space-y-1">
+                    <div>First affected record: #{integrityResult.first_failure.sequence || 'Unknown'} ({integrityResult.first_failure.entity_type})</div>
+                    <div>Reason: <span className="font-bold">{integrityResult.first_failure.reason}</span></div>
+                    <div className="text-[11px] text-ink-700">{integrityResult.first_failure.details}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Integrity Metrics Grid */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
+              <div className="bg-white border border-editorial-border p-3">
+                <span className="text-[9px] uppercase tracking-wider text-ink-400 block">LEDGER ENTRIES</span>
+                <span className="text-sm font-bold text-ink-950 mt-1 block">
+                  {integrityResult?.entries_checked ?? '--'}
+                </span>
+              </div>
+
+              <div className="bg-white border border-editorial-border p-3">
+                <span className="text-[9px] uppercase tracking-wider text-ink-400 block">OBSERVATIONS CHECKED</span>
+                <span className="text-sm font-bold text-ink-950 mt-1 block">
+                  {integrityResult?.observations_checked ?? '--'}
+                </span>
+              </div>
+
+              <div className="bg-white border border-editorial-border p-3">
+                <span className="text-[9px] uppercase tracking-wider text-ink-400 block">EVIDENCE CHECKED</span>
+                <span className="text-sm font-bold text-ink-950 mt-1 block">
+                  {integrityResult?.evidence_checked ?? '--'}
+                </span>
+              </div>
+
+              <div className="bg-white border border-editorial-border p-3">
+                <span className="text-[9px] uppercase tracking-wider text-ink-400 block">HASH ALGORITHM</span>
+                <span className="text-sm font-bold text-ink-950 mt-1 block">SHA-256</span>
+              </div>
+            </div>
+
+            {/* Ledger Actions */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+              <div className="text-[10px] font-mono text-ink-500 uppercase">
+                {integrityResult?.verified_at
+                  ? `LAST VERIFIED: ${new Date(integrityResult.verified_at).toISOString().replace('T', ' ').slice(0, 19)} UTC`
+                  : 'STATUS: NOT VERIFIED (PENDING CHECK)'}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleOpenLedger}
+                  className="bg-white hover:bg-alabaster-100 border border-editorial-border text-ink-900 text-xs font-mono font-bold uppercase tracking-wider px-4 py-2 transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Database className="w-3.5 h-3.5 text-ink-700" />
+                  <span>VIEW LEDGER</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleVerifyIntegrity}
+                  disabled={verifyingIntegrity}
+                  className="bg-ink-950 hover:bg-neutral-800 disabled:opacity-50 text-white text-xs font-mono font-bold uppercase tracking-wider px-4 py-2 transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <ShieldCheck className={`w-3.5 h-3.5 ${verifyingIntegrity ? 'animate-spin' : 'text-emerald-400'}`} />
+                  <span>{verifyingIntegrity ? 'VERIFYING...' : 'VERIFY INTEGRITY'}</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -907,6 +1970,7 @@ export default function EvaluationsPage() {
             </div>
           )}
 
+          {/* Submission Toolbar */}
           <div className="flex justify-end pt-4 border-t border-editorial-border">
             <button
               type="button"
@@ -931,14 +1995,32 @@ export default function EvaluationsPage() {
           <ToleranceChart instrument={instrument} results={evaluation?.results || []} />
 
           <div className="border border-editorial-border overflow-hidden bg-white shadow-editorial">
-            <div className="flex items-center justify-between bg-alabaster-50 border-b border-editorial-border px-4 py-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-alabaster-50 border-b border-editorial-border px-4 py-3 gap-2">
               <div className="flex items-center gap-2 text-xs font-mono font-bold uppercase tracking-wider text-ink-900">
                 <ClipboardList className="w-4 h-4 text-ink-900" />
                 <span>KEYBOARD-FIRST WORKSHEET (CLAUSE A.4.4)</span>
               </div>
-              <div className="text-[10px] font-mono text-ink-500 uppercase tracking-wider flex items-center gap-1.5">
-                <Save className="w-3.5 h-3.5" />
-                AUTO-SAVED IN LOCAL ENCLAVE
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={applyPlanLoadPoints}
+                  className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-ink-950 text-white hover:bg-neutral-800 transition-colors shadow-xs cursor-pointer"
+                  title="Populate test rows with load points generated by OIML Test Plan"
+                >
+                  USE PLAN LOAD POINTS
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPoints(defaultPoints)}
+                  className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-white border border-editorial-border text-ink-700 hover:bg-alabaster-100 transition-colors cursor-pointer"
+                  title="Populate test rows with demo simulator points"
+                >
+                  DEMO TEMPLATE
+                </button>
+                <div className="text-[10px] font-mono text-ink-500 uppercase tracking-wider flex items-center gap-1.5 ml-2">
+                  <Save className="w-3.5 h-3.5" />
+                  ENCLAVE
+                </div>
               </div>
             </div>
 
@@ -1024,12 +2106,55 @@ export default function EvaluationsPage() {
                       <td className="p-3 text-ink-500 font-mono">{res ? `±${res.mpe_allowed.toFixed(5)}` : '--'}</td>
                       <td className="p-3 text-center">
                         {res && (
-                          <span className={`px-2.5 py-0.5 text-[9px] font-mono font-bold tracking-wider uppercase border ${
-                            res.status === 'PASS' ? 'bg-white text-emerald-800 border-emerald-300' :
-                            res.status === 'WARN' ? 'bg-neutral-100 text-amber-800 border-amber-300' : 'bg-neutral-900 text-rose-400 border-neutral-700'
-                          }`}>
-                            {res.status}
-                          </span>
+                          <div className="flex flex-col items-center gap-1">
+                            <span className={`px-2.5 py-0.5 text-[9px] font-mono font-bold tracking-wider uppercase border ${
+                              res.status === 'PASS' ? 'bg-white text-emerald-800 border-emerald-300' :
+                              res.status === 'WARN' ? 'bg-neutral-100 text-amber-800 border-amber-300' : 'bg-neutral-900 text-rose-400 border-neutral-700'
+                            }`}>
+                              {res.status}
+                            </span>
+                            {res.status === 'FAIL' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const excess = Math.max(0, Number((Math.abs(res.corrected_error_ec) - res.mpe_allowed).toFixed(5)));
+                                  const marginPct = Number((excess / res.mpe_allowed * 100).toFixed(1));
+                                  const expl: FailureExplanation = {
+                                    id: `exp-weigh-${idx+1}`,
+                                    report_id: reportId || 'draft',
+                                    test_type: 'WEIGHING',
+                                    clause_reference: 'OIML R 76-1:2006 Clause A.4.4',
+                                    rule_id: 'RULE-OIML-A44-WEIGHING',
+                                    rule_version: '2006',
+                                    failure_code: 'ERROR_EXCEEDS_MPE',
+                                    title: `Weighing Performance — Non-Compliant Observation #${idx+1}`,
+                                    summary: `Observation #${idx+1} at ${res.load_applied} ${instrument.unit} failed: calculated error ${res.corrected_error_ec > 0 ? '+' : ''}${res.corrected_error_ec} ${instrument.unit} exceeds allowed limit ±${res.mpe_allowed} ${instrument.unit} by ${excess} ${instrument.unit}.`,
+                                    measured_value: res.indication_observed,
+                                    expected_value: res.load_applied,
+                                    error_value: res.corrected_error_ec,
+                                    allowed_limit: res.mpe_allowed,
+                                    excess_value: excess,
+                                    margin_percentage: marginPct,
+                                    unit: instrument.unit,
+                                    direction: pt.direction,
+                                    position: 'CENTER',
+                                    explanation: `Under OIML R 76-1:2006 Clause A.4.4, test point #${idx+1} (${pt.direction}) with applied load ${res.load_applied} ${instrument.unit} produced observed indication ${res.indication_observed} ${instrument.unit}. The calculated corrected error Ec is ${res.corrected_error_ec > 0 ? '+' : ''}${res.corrected_error_ec} ${instrument.unit}, which exceeds the statutory maximum permissible error of ±${res.mpe_allowed} ${instrument.unit} by ${excess} ${instrument.unit} (${marginPct}% beyond allowed tolerance).`,
+                                    severity: 'ERROR',
+                                    evidence_ids: [],
+                                    created_at: new Date().toISOString(),
+                                    engine_version: 'OIML-R76-2006-V1.0',
+                                    explanation_version: 'M76-FAIL-EXPLAIN-V1',
+                                    details: { calculated_p: res.calculated_p, corrected_error_ec: res.corrected_error_ec }
+                                  };
+                                  setSelectedExplanation(expl);
+                                  setIsDetailOpen(true);
+                                }}
+                                className="text-[9px] font-mono text-rose-700 underline hover:text-rose-900 cursor-pointer"
+                              >
+                                Why did this fail?
+                              </button>
+                            )}
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -1058,12 +2183,30 @@ export default function EvaluationsPage() {
     if (activeTab === 'B_REPEATABILITY') {
       return (
         <div className="bg-white p-6 sm:p-8 border border-editorial-border shadow-editorial space-y-6">
-          <div className="flex items-center justify-between border-b border-editorial-border pb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-editorial-border pb-3 gap-2">
             <div>
               <h3 className="font-display font-bold text-base uppercase text-ink-950">REPEATABILITY MATRIX (CLAUSE A.4.10)</h3>
               <p className="text-[11px] font-mono text-ink-500 uppercase tracking-wider mt-0.5">Series A/B/C with running spread, sample standard deviation, and compliance check.</p>
             </div>
-            <span className="bg-ink-950 text-white text-[9px] font-mono font-bold px-2.5 py-1 uppercase">LIVE EVAL</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={applyPlanRepeatability}
+                className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-ink-950 text-white hover:bg-neutral-800 transition-colors shadow-xs cursor-pointer"
+                title="Populate repeatability series from OIML Test Plan"
+              >
+                USE PLAN SERIES
+              </button>
+              <button
+                type="button"
+                onClick={() => setRepeatabilityData(createRepeatabilitySeries(instrument.max_capacity))}
+                className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-white border border-editorial-border text-ink-700 hover:bg-alabaster-100 transition-colors cursor-pointer"
+                title="Reset to demo template"
+              >
+                DEMO TEMPLATE
+              </button>
+              <span className="bg-ink-950 text-white text-[9px] font-mono font-bold px-2.5 py-1 uppercase ml-2">LIVE EVAL</span>
+            </div>
           </div>
 
           <div className="grid md:grid-cols-3 gap-6">
@@ -1134,12 +2277,30 @@ export default function EvaluationsPage() {
     if (activeTab === 'C_ECCENTRICITY') {
       return (
         <div className="bg-white p-6 sm:p-8 border border-editorial-border shadow-editorial space-y-6">
-          <div className="flex items-center justify-between border-b border-editorial-border pb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-editorial-border pb-3 gap-2">
             <div>
               <h3 className="font-display font-bold text-base uppercase text-ink-950">ECCENTRICITY PLATTER (CLAUSE A.4.7)</h3>
               <p className="text-[11px] font-mono text-ink-500 uppercase tracking-wider mt-0.5">Center and quadrant loading with automatic 1/3Max recommendation and per-position error bounds.</p>
             </div>
-            <span className="bg-ink-950 text-white text-[9px] font-mono font-bold px-2.5 py-1 uppercase">LIVE EVAL</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={applyPlanEccentricity}
+                className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-ink-950 text-white hover:bg-neutral-800 transition-colors shadow-xs cursor-pointer"
+                title="Populate eccentricity positions & load from OIML Test Plan"
+              >
+                USE PLAN CORNER LOAD
+              </button>
+              <button
+                type="button"
+                onClick={() => setEccentricityPoints(defaultEccentricityPoints)}
+                className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase bg-white border border-editorial-border text-ink-700 hover:bg-alabaster-100 transition-colors cursor-pointer"
+                title="Reset to demo template"
+              >
+                DEMO TEMPLATE
+              </button>
+              <span className="bg-ink-950 text-white text-[9px] font-mono font-bold px-2.5 py-1 uppercase ml-2">LIVE EVAL</span>
+            </div>
           </div>
 
           <div className="grid lg:grid-cols-[240px_1fr] gap-6">
@@ -1406,14 +2567,96 @@ export default function EvaluationsPage() {
         )}
       </div>
 
+      {draftSavedToast && (
+        <div className="border border-emerald-300 bg-white p-4 text-xs font-mono font-bold text-emerald-800 flex items-center gap-2 shadow-editorial">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+          <span>{draftSavedToast}</span>
+        </div>
+      )}
+
       {/* Meta Specifications Ribbon */}
       <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 p-5 bg-white border border-editorial-border text-xs shadow-editorial">
         <div><span className="text-ink-400 block uppercase font-mono text-[9px] tracking-wider">CLASS</span><span className="font-bold font-mono text-ink-950">{instrument.accuracy_class}</span></div>
         <div><span className="text-ink-400 block uppercase font-mono text-[9px] tracking-wider">MAX CAPACITY</span><span className="font-bold font-mono text-ink-950">{instrument.max_capacity} kg</span></div>
         <div><span className="text-ink-400 block uppercase font-mono text-[9px] tracking-wider">INTERVAL (e)</span><span className="font-bold font-mono text-ink-950">{instrument.verification_interval_e} kg</span></div>
         <div><span className="text-ink-400 block uppercase font-mono text-[9px] tracking-wider">ZERO ERROR (E₀)</span><span className="font-bold font-mono text-ink-950">{evaluation?.zero_error_e0 ?? '--'} kg</span></div>
-        <div><span className="text-ink-400 block uppercase font-mono text-[9px] tracking-wider">DRAFT STATUS</span><span className="font-bold font-mono text-ink-950">LOCAL SYNCED</span></div>
+        <div>
+          <span className="text-ink-400 block uppercase font-mono text-[9px] tracking-wider">DATABASE DRAFT</span>
+          <span className={`font-bold font-mono text-xs ${reportId ? 'text-emerald-700' : 'text-amber-700'}`}>
+            {reportId ? (loadedReportNumber || reportId.slice(0, 8)) : 'UNSAVED'}
+          </span>
+        </div>
         <div><span className="text-ink-400 block uppercase font-mono text-[9px] tracking-wider">LIFECYCLE</span><span className="font-bold font-mono text-ink-950">DRAFT PACKET</span></div>
+      </div>
+
+      {/* Draft Persistence Status & Action Bar */}
+      <div className={`p-4 border text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-editorial ${
+        reportId ? 'bg-white border-editorial-border' : 'bg-amber-50/70 border-amber-300'
+      }`}>
+        <div className="flex items-center gap-2.5">
+          {reportId ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          ) : (
+            <Info className="w-4 h-4 text-amber-600 shrink-0" />
+          )}
+          <div>
+            <span className="font-bold uppercase tracking-wider text-[11px] text-ink-950">
+              {reportId ? `ACTIVE DRAFT: ${loadedReportNumber || reportId} • DATABASE PERSISTED` : 'LOCAL WORKSPACE • DRAFT NOT SAVED TO DATABASE'}
+            </span>
+            <p className="text-[10px] text-ink-500 mt-0.5">
+              {reportId
+                ? 'Observations are officially tracked in Supabase and listed in the Technical Testing Queue.'
+                : 'No database draft is saved unless explicitly requested. Click "Save Draft to Database" to persist.'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {reportId ? (
+            <>
+              <button
+                type="button"
+                onClick={() => handleSaveDraftToDatabase()}
+                disabled={savingDraft || deletingActiveDraft}
+                className="px-3 py-1.5 bg-ink-950 hover:bg-neutral-800 disabled:opacity-50 text-white font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer"
+              >
+                {savingDraft ? 'SYNCING...' : 'SYNC OBSERVATIONS'}
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteActiveDraft}
+                disabled={deletingActiveDraft}
+                className="px-3 py-1.5 bg-white hover:bg-rose-50 border border-editorial-border hover:border-rose-300 text-rose-700 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1"
+                title="Permanently delete active draft"
+              >
+                {deletingActiveDraft ? (
+                  <span className="w-3 h-3 border-2 border-rose-600 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Trash2 className="w-3 h-3" />
+                )}
+                <span>DELETE DRAFT</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleStartNewEvaluation}
+                disabled={deletingActiveDraft}
+                className="px-3 py-1.5 bg-white hover:bg-alabaster-100 border border-editorial-border text-ink-900 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer"
+              >
+                + NEW EVALUATION
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => handleSaveDraftToDatabase()}
+              disabled={savingDraft}
+              className="px-4 py-2 bg-ink-950 hover:bg-neutral-800 disabled:opacity-50 text-white font-mono text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer shadow-editorial flex items-center gap-1.5"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>{savingDraft ? 'SAVING DRAFT...' : 'SAVE DRAFT TO DATABASE'}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Step Tabs */}
@@ -1421,8 +2664,9 @@ export default function EvaluationsPage() {
         {[
           { step: 1, label: '1. PASSPORT' },
           { step: 2, label: '2. AMBIENT' },
-          { step: 3, label: '3. WORKSHEETS' },
-          { step: 4, label: '4. SUMMARY' },
+          { step: 3, label: '3. TEST PLAN' },
+          { step: 4, label: '4. WORKSHEETS' },
+          { step: 5, label: '5. SUMMARY' },
         ].map(({ step, label }) => (
           <button
             key={step}
@@ -1458,13 +2702,29 @@ export default function EvaluationsPage() {
 
         <button
           type="button"
-          onClick={() => setWizardStep((prev) => Math.min(prev + 1, 4))}
-          disabled={wizardStep === 4 || standardIsBlocked}
+          onClick={() => setWizardStep((prev) => Math.min(prev + 1, 5))}
+          disabled={wizardStep === 5 || (wizardStep === 2 && standardIsBlocked)}
           className="px-6 py-2.5 bg-ink-950 hover:bg-neutral-800 text-white text-xs font-mono font-bold uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed shadow-editorial transition-colors cursor-pointer"
         >
-          {wizardStep === 4 ? 'FINAL REVIEW' : 'NEXT STEP →'}
+          {wizardStep === 5 ? 'FINAL REVIEW' : wizardStep === 3 ? 'PROCEED TO WORKSHEETS →' : 'NEXT STEP →'}
         </button>
       </div>
+
+      {/* Feature 1: Clause-Level Failure Explanation Drawer/Panel */}
+      <FailureDetailPanel
+        explanation={selectedExplanation}
+        isOpen={isDetailOpen}
+        onClose={() => setIsDetailOpen(false)}
+      />
+
+      {/* Feature 2: Cryptographic Raw-Data Ledger Viewer */}
+      <LedgerViewerModal
+        isOpen={isLedgerOpen}
+        onClose={() => setIsLedgerOpen(false)}
+        entries={ledgerEntries}
+        verificationResult={integrityResult}
+        reportNumber={reportId || 'Draft Evaluation Report'}
+      />
     </div>
   );
 }

@@ -237,3 +237,213 @@ export interface ReportSubmissionResult {
   status: ReportStatus;
   message: string;
 }
+
+export type FailureCode =
+  | 'ERROR_EXCEEDS_MPE'
+  | 'REPEATABILITY_EXCEEDS_LIMIT'
+  | 'ECCENTRICITY_EXCEEDS_LIMIT'
+  | 'ZERO_ERROR_EXCEEDS_LIMIT'
+  | 'TARE_ERROR_EXCEEDS_LIMIT'
+  | 'INVALID_OBSERVATION'
+  | 'MISSING_REQUIRED_OBSERVATION'
+  | 'RULE_NOT_CONFIGURED'
+  | 'STANDARD_INVALID';
+
+export interface FailureExplanation {
+  id: string;
+  report_id: string;
+  observation_id?: string | null;
+  test_type: TestType | string;
+  clause_reference?: string | null;
+  rule_id?: string | null;
+  rule_version?: string | null;
+  failure_code: FailureCode;
+  title: string;
+  summary: string;
+  measured_value?: number | null;
+  expected_value?: number | null;
+  error_value?: number | null;
+  allowed_limit?: number | null;
+  excess_value?: number | null;
+  margin_percentage?: number | null;
+  unit?: string | null;
+  direction?: TestDirection | string | null;
+  position?: string | null;
+  run_cycle?: number | null;
+  explanation: string;
+  severity: 'WARNING' | 'ERROR' | 'CRITICAL';
+  evidence_ids: string[];
+  created_at: string;
+  engine_version: string;
+  explanation_version: string;
+  details?: Record<string, unknown>;
+}
+
+export interface FailureExplanationResponse {
+  report_id: string;
+  overall_status: 'PASS' | 'FAIL';
+  failed_tests: number;
+  failed_observations: number;
+  explanations: FailureExplanation[];
+  engine_version: string;
+  explanation_version: string;
+}
+
+export type IntegrityStatus =
+  | 'INTACT'
+  | 'TAMPER_DETECTED'
+  | 'MISSING_ENTRY'
+  | 'BROKEN_CHAIN'
+  | 'PAYLOAD_MISMATCH'
+  | 'EVIDENCE_MISMATCH'
+  | 'VERIFICATION_ERROR'
+  | 'NOT_VERIFIED';
+
+export type EntityType =
+  | 'REPORT'
+  | 'TEST_PLAN'
+  | 'TEST_OBSERVATION'
+  | 'DEVICE_MEASUREMENT'
+  | 'EVIDENCE'
+  | 'REFERENCE_STANDARD';
+
+export interface IntegrityEntry {
+  id: string;
+  report_id?: string | null;
+  entity_type: EntityType | string;
+  entity_id: string;
+  event_type: string;
+  sequence_number: number;
+  payload_hash: string;
+  previous_hash?: string | null;
+  entry_hash: string;
+  algorithm: string;
+  canonicalization_version: string;
+  created_at: string;
+  created_by?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface IntegrityFailureDetail {
+  sequence?: number | null;
+  entity_type?: string | null;
+  entity_id?: string | null;
+  reason: string;
+  expected_hash?: string | null;
+  actual_hash?: string | null;
+  details?: string | null;
+}
+
+export interface IntegrityVerificationResult {
+  report_id: string;
+  status: IntegrityStatus;
+  entries_checked: number;
+  observations_checked: number;
+  evidence_checked: number;
+  chain_head_hash?: string | null;
+  first_failure?: IntegrityFailureDetail | null;
+  verified_at: string;
+  checkpoint?: Record<string, unknown> | null;
+  message?: string | null;
+}
+
+export type TestPlanStatus = 'INVALID' | 'READY' | 'IN_PROGRESS' | 'COMPLETED' | 'STALE';
+
+export type TestExecutionStatus =
+  | 'NOT_STARTED'
+  | 'BLOCKED'
+  | 'READY'
+  | 'RUNNING'
+  | 'PAUSED'
+  | 'COMPLETED'
+  | 'ABORTED'
+  | 'NOT_CONFIGURED';
+
+export type TestComplianceStatus = 'NOT_EVALUATED' | 'PASS' | 'FAIL';
+
+export interface TestPlanIssue {
+  field?: string | null;
+  message: string;
+  severity?: string;
+}
+
+export interface ObservationSchema {
+  minimum_observations: number;
+  requires_zero: boolean;
+  directions: string[];
+  expected_load_points: number[];
+  positions: string[];
+  series_count?: number | null;
+  runs_per_series?: number | null;
+}
+
+export interface ProcedureConfig {
+  parameters?: Record<string, unknown>;
+  instructions?: string | null;
+  calculated_load_points?: Array<{
+    load: number;
+    unit: string;
+    direction: string;
+    is_statutory_boundary: boolean;
+  }>;
+  recommended_load?: number | null;
+  tolerance_summary?: string | null;
+}
+
+export interface TestPlanItem {
+  id: string;
+  test_plan_id: string;
+  test_type: 'WEIGHING' | 'REPEATABILITY' | 'ECCENTRICITY' | 'TARE_ZERO' | string;
+  test_code: string;
+  title: string;
+  description?: string | null;
+  standard_reference?: string | null;
+  sequence_order: number;
+  applicable: boolean;
+  configured: boolean;
+  execution_status: TestExecutionStatus;
+  compliance_status: TestComplianceStatus;
+  blocked_reason?: string | null;
+  prerequisites: string[];
+  required_standards: Record<string, unknown>;
+  observation_schema: ObservationSchema;
+  procedure_config: ProcedureConfig;
+  rule_version: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface TestPlan {
+  id: string;
+  report_id: string;
+  instrument_id: string;
+  reference_standard_id?: string | null;
+  standard_version: string;
+  rule_set_version: string;
+  generator_version: string;
+  status: TestPlanStatus;
+  instrument_snapshot: Record<string, unknown>;
+  issues: TestPlanIssue[];
+  items: TestPlanItem[];
+  supersedes_plan_id?: string | null;
+  generated_at: string;
+  generated_by?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface TestPlanDiff {
+  has_changes: boolean;
+  added_tests: string[];
+  removed_tests: string[];
+  modified_tests: string[];
+  changed_reasons: string[];
+}
+
+export interface TestPlanResponse {
+  plan: TestPlan;
+  diff?: TestPlanDiff | null;
+  message: string;
+}

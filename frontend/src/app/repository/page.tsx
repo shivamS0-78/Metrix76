@@ -90,18 +90,6 @@ export default function RepositoryPage() {
         </div>
 
         <div className="flex items-center gap-2.5">
-          {role === 'TECHNICIAN' ? (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 text-amber-900 border border-amber-200 shadow-xs">
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              My Evaluations Only ({user?.email})
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-800 border border-slate-200 shadow-xs">
-              <span className="w-2 h-2 rounded-full bg-blue-600" />
-              All Organization Records ({role || 'Authorized'})
-            </span>
-          )}
-
           <button
             onClick={fetchReports}
             className="bg-ink-950 hover:bg-neutral-800 text-white px-5 py-2.5 text-xs font-mono font-bold uppercase tracking-wider flex items-center gap-2 transition-all shadow-editorial cursor-pointer"

@@ -40,6 +40,10 @@ ATTACHMENT_CATEGORY_METADATA = [
 ]
 
 
+from app.services.integrity import IntegrityLedgerService
+from app.core.supabase import get_supabase_client
+
+
 class AttachmentUploadResponse(BaseModel):
     id: str
     attachment_type: str
@@ -49,6 +53,8 @@ class AttachmentUploadResponse(BaseModel):
     file_size_bytes: int
     uploaded_at: datetime
     message: str
+    sha256_hash: Optional[str] = None
+    integrity_entry_id: Optional[str] = None
 
 
 @router.get("/categories")
@@ -64,11 +70,12 @@ async def upload_instrument_attachment(
     file: UploadFile = File(...),
     attachment_type: str = Form(...),
     instrument_id: Optional[str] = Form(None),
-    report_id: Optional[str] = Form(None)
+    report_id: Optional[str] = Form(None),
+    supersedes_evidence_id: Optional[str] = Form(None)
 ):
     """
-    Receives image stream, verifies MIME type, generates compressed preview,
-    and returns registration payload for Supabase Storage.
+    Receives image stream, verifies MIME type, computes authoritative SHA-256 digest of file bytes,
+    records immutable cryptographic evidence in the integrity ledger, and stages to storage.
     """
     # 1. Validate Category Tag
     clean_category = attachment_type.upper().strip()
@@ -85,7 +92,7 @@ async def upload_instrument_attachment(
             detail=f"Unsupported file format '{file.content_type}'. Must be image/jpeg, image/png, or image/webp."
         )
 
-    # 3. Read content
+    # 3. Read content bytes
     contents = await file.read()
     if len(contents) == 0:
         raise HTTPException(
@@ -93,14 +100,10 @@ async def upload_instrument_attachment(
             detail="Uploaded file is empty."
         )
 
-    # 4. Image compression & validation via Pillow
+    # 4. Image verification via Pillow
     try:
         img = Image.open(io.BytesIO(contents))
-        img.verify()  # Verify integrity
-        # Reopen after verify
-        img = Image.open(io.BytesIO(contents))
-        # Optional thumbnail / optimization
-        img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        img.verify()
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -115,14 +118,52 @@ async def upload_instrument_attachment(
 
     attachment_id = f"att-{file_uuid[:8]}"
     uploaded_at = datetime.now(timezone.utc)
+    file_name = file.filename or f"{clean_category.lower()}.{ext}"
+
+    # 6. Cryptographic Evidence Hashing & Integrity Ledger Append
+    integrity_entry, file_hash = IntegrityLedgerService.record_evidence_upload(
+        report_id=report_id,
+        attachment_id=attachment_id,
+        file_bytes=contents,
+        metadata={
+            "content_type": file.content_type,
+            "file_name": file_name,
+            "attachment_type": clean_category,
+            "storage_path": storage_path,
+            "supersedes_evidence_id": supersedes_evidence_id,
+            "raw_bytes": contents
+        }
+    )
+
+    # 7. Persist to Supabase if available
+    supabase = get_supabase_client()
+    if supabase and instrument_id:
+        try:
+            supabase.table("instrument_attachments").insert({
+                "id": str(uuid.uuid4()),
+                "instrument_id": instrument_id,
+                "report_id": report_id,
+                "attachment_type": clean_category,
+                "storage_path": storage_path,
+                "sha256_hash": file_hash,
+                "file_name": file_name,
+                "file_size_bytes": len(contents),
+                "mime_type": file.content_type,
+                "integrity_entry_id": integrity_entry.id,
+                "supersedes_evidence_id": supersedes_evidence_id
+            }).execute()
+        except Exception as e:
+            print(f"[Supabase] Attachment record insert note: {e}")
 
     return AttachmentUploadResponse(
         id=attachment_id,
         attachment_type=clean_category,
         storage_path=storage_path,
-        file_name=file.filename or f"{clean_category.lower()}.{ext}",
+        file_name=file_name,
         content_type=file.content_type,
         file_size_bytes=len(contents),
         uploaded_at=uploaded_at,
-        message=f"Photographic evidence '{clean_category}' verified and staged successfully."
+        sha256_hash=file_hash,
+        integrity_entry_id=integrity_entry.id,
+        message=f"Photographic evidence '{clean_category}' verified and cryptographically sealed into integrity ledger."
     )

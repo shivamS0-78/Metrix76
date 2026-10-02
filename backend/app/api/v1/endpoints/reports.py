@@ -35,9 +35,15 @@ from app.services.metrology import (
     EccentricityEvaluator,
     TareZeroEvaluator,
 )
+from app.services.integrity import (
+    IntegrityLedgerService,
+    IntegrityVerifierService,
+    IntegrityStatus,
+)
 from app.core.supabase import get_supabase_client
 from app.api.v1.endpoints.instruments import _LOCAL_CACHE as _LOCAL_INSTRUMENTS, _map_row_to_instrument
 from app.api.v1.endpoints.reference_standards import _LOCAL_CACHE as _LOCAL_STANDARDS, _map_row_to_standard
+import uuid
 
 router = APIRouter()
 
@@ -352,6 +358,13 @@ def create_report_draft(payload: TestReportCreate):
             if res.data and len(res.data) > 0:
                 new_row = res.data[0]
                 persisted_report = get_report_detail(new_row["id"])
+                # Record draft genesis event in integrity ledger
+                IntegrityLedgerService.record_report_lifecycle_event(
+                    report_id=persisted_report.id,
+                    event_type="DRAFT_CREATED",
+                    report_data={"report_number": persisted_report.report_number, "status": "DRAFT", "overall_verdict": None},
+                    user_id=conducted_by_id
+                )
                 # Update in-memory cache
                 if not any(r.id == persisted_report.id for r in _LOCAL_REPORTS):
                     _LOCAL_REPORTS.append(persisted_report)
@@ -391,6 +404,15 @@ def create_report_draft(payload: TestReportCreate):
     )
     _LOCAL_REPORTS.append(draft)
     _LOCAL_OBSERVATIONS.setdefault(report_id, [])
+
+    # Record draft genesis event in integrity ledger
+    IntegrityLedgerService.record_report_lifecycle_event(
+        report_id=draft.id,
+        event_type="DRAFT_CREATED",
+        report_data={"report_number": draft.report_number, "status": "DRAFT", "overall_verdict": None},
+        user_id=payload.conducted_by
+    )
+
     return draft
 
 
@@ -572,9 +594,33 @@ def upsert_report_observations(report_id: str, payload: BatchObservationPayload)
                 "run_cycle": o.run_cycle or 1
             })
 
+    # Cryptographic Observation Integrity Ledger Hashing
+    for row in obs_rows:
+        obs_id = row.get("id") or str(uuid.uuid4())
+        row["id"] = obs_id
+        entry, p_hash = IntegrityLedgerService.record_observation_capture(
+            report_id=report_id,
+            observation_id=obs_id,
+            observation_data=row
+        )
+        row["payload_hash"] = p_hash
+        row["integrity_entry_id"] = entry.id
+
     # Calculate overall compliance verdict across all test points
     overall_verdict = all(row["is_compliant"] for row in obs_rows) if obs_rows else True
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Record TEST_COMPLETED lifecycle event
+    IntegrityLedgerService.record_report_lifecycle_event(
+        report_id=report_id,
+        event_type="TEST_COMPLETED",
+        report_data={
+            "report_number": rep.report_number,
+            "status": rep.status,
+            "overall_verdict": overall_verdict,
+            "observations_count": len(obs_rows)
+        }
+    )
 
     # Persist authoritative results to Supabase
     supabase = get_supabase_client()
@@ -599,6 +645,13 @@ def upsert_report_observations(report_id: str, payload: BatchObservationPayload)
         rep.eccentricity_results = ecc_res.results
     rep.overall_verdict = overall_verdict
     rep.updated_at = datetime.now(timezone.utc)
+
+    # Synchronize Test Plan execution & compliance states
+    try:
+        from app.services.metrology.test_plan import TestPlanService
+        TestPlanService.sync_plan_from_observations(report_id)
+    except Exception as e:
+        print(f"[TestPlan] Sync note: {e}")
 
     return {
         "report_id": report_id,
@@ -722,6 +775,18 @@ def submit_report(report_id: str):
 
     rep.status = ReportStatus.PENDING_APPROVAL
     rep.updated_at = datetime.now(timezone.utc)
+
+    # Record REPORT_SUBMITTED lifecycle event in integrity ledger
+    IntegrityLedgerService.record_report_lifecycle_event(
+        report_id=rep.id,
+        event_type="REPORT_SUBMITTED",
+        report_data={
+            "report_number": rep.report_number,
+            "status": "PENDING_APPROVAL",
+            "overall_verdict": rep.overall_verdict
+        }
+    )
+
     return ReportSubmissionResponse(
         report_id=rep.id,
         status=rep.status,
@@ -888,6 +953,50 @@ def get_report_detail(report_id: str):
     return rep
 
 
+@router.delete("/{report_id}", status_code=status.HTTP_200_OK)
+def delete_report_draft(report_id: str):
+    """
+    Deletes a draft test report. Only reports in 'DRAFT' status can be deleted.
+    """
+    global _LOCAL_REPORTS
+    supabase = get_supabase_client()
+    if supabase:
+        try:
+            chk = supabase.table("test_reports").select("status").eq("id", report_id).execute()
+            if not chk.data:
+                rep = next((r for r in _LOCAL_REPORTS if r.id == report_id), None)
+                if not rep:
+                    raise HTTPException(status_code=404, detail="Test report not found")
+                if rep.status != ReportStatus.DRAFT:
+                    raise HTTPException(status_code=400, detail="Only draft reports can be deleted")
+            else:
+                rep_status = chk.data[0].get("status")
+                if rep_status != "DRAFT":
+                    raise HTTPException(status_code=400, detail="Only draft reports can be deleted")
+
+            try:
+                supabase.table("integrity_ledger").delete().eq("report_id", report_id).execute()
+            except Exception:
+                pass
+            try:
+                supabase.table("test_plans").delete().eq("report_id", report_id).execute()
+            except Exception:
+                pass
+            try:
+                supabase.table("test_observations").delete().eq("report_id", report_id).execute()
+            except Exception:
+                pass
+
+            supabase.table("test_reports").delete().eq("id", report_id).execute()
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[Supabase] Error deleting report draft: {e}")
+
+    _LOCAL_REPORTS = [r for r in _LOCAL_REPORTS if r.id != report_id]
+    return {"status": "success", "message": f"Draft report {report_id} deleted successfully"}
+
+
 @router.get("/verify/{report_id}", response_model=PublicVerificationResponse)
 def public_verify_report(report_id: str):
     """
@@ -903,6 +1012,9 @@ def public_verify_report(report_id: str):
                 if row.get("status") != "APPROVED":
                     raise HTTPException(status_code=404, detail="Report is not approved for type verification")
 
+                ver_res = IntegrityVerifierService.get_cached_or_verify(report_id)
+                integ_status = "VERIFIED" if ver_res.status == IntegrityStatus.INTACT else ver_res.status.value
+
                 return PublicVerificationResponse(
                     is_valid=True,
                     report_number=row["report_number"],
@@ -914,7 +1026,9 @@ def public_verify_report(report_id: str):
                     overall_verdict=bool(row.get("overall_verdict", True)),
                     approved_at=datetime.fromisoformat(row["approved_at"].replace("Z", "+00:00")) if row.get("approved_at") else None,
                     sha256_hash=row.get("sha256_hash", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
-                    verified_at=datetime.now(timezone.utc)
+                    verified_at=datetime.now(timezone.utc),
+                    integrity_status=integ_status,
+                    chain_root_hash=ver_res.chain_head_hash
                 )
         except HTTPException:
             raise
@@ -924,6 +1038,9 @@ def public_verify_report(report_id: str):
     rep = next((r for r in _LOCAL_REPORTS if r.id == report_id), None)
     if not rep or rep.status != ReportStatus.APPROVED:
         raise HTTPException(status_code=404, detail="Valid approved certificate not found for this identifier")
+
+    ver_res = IntegrityVerifierService.get_cached_or_verify(report_id)
+    integ_status = "VERIFIED" if ver_res.status == IntegrityStatus.INTACT else ver_res.status.value
 
     return PublicVerificationResponse(
         is_valid=True,
@@ -936,5 +1053,7 @@ def public_verify_report(report_id: str):
         overall_verdict=rep.overall_verdict if rep.overall_verdict is not None else True,
         approved_at=rep.approved_at,
         sha256_hash=rep.sha256_hash or "e3b0c44298fc1c149afbf4c8996fb924",
-        verified_at=datetime.now(timezone.utc)
+        verified_at=datetime.now(timezone.utc),
+        integrity_status=integ_status,
+        chain_root_hash=ver_res.chain_head_hash
     )

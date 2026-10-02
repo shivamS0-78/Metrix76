@@ -4,6 +4,7 @@ from .eccentricity import EccentricityEvaluator
 from .tare_zero import TareZeroEvaluator
 from .uncertainty import UncertaintyCalculator, UncertaintyBudget
 from .sanity import InstrumentSanityEngine
+from .explanations import FailureExplanationGenerator, FailureExplanation, FailureExplanationResponse
 
 __all__ = [
     "OIMLR76Engine",
@@ -13,4 +14,7 @@ __all__ = [
     "UncertaintyCalculator",
     "UncertaintyBudget",
     "InstrumentSanityEngine",
+    "FailureExplanationGenerator",
+    "FailureExplanation",
+    "FailureExplanationResponse",
 ]

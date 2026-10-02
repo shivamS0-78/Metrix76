@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 from pydantic import BaseModel
 from app.schemas.report import VerificationAction, ReportStatus
 from app.schemas.integrity import IntegritySeal, IntegrityVerifyRequest, IntegrityVerifyResponse
-from app.services.integrity import CryptoIntegrityService
+from app.services.integrity import CryptoIntegrityService, IntegrityLedgerService
 from app.services.reporting import OIMLPDFGenerator, OIMLErrorChartEngine
 from app.services.document.crypto import CryptoAuditService
 from app.core.supabase import get_supabase_client
@@ -179,6 +179,21 @@ def process_verification_action(report_id: str, payload: VerificationAction):
                 r.updated_at = now
                 break
 
+        # Record cryptographically sealed REPORT_APPROVED event in integrity ledger
+        IntegrityLedgerService.record_report_lifecycle_event(
+            report_id=report_id,
+            event_type="REPORT_APPROVED",
+            report_data={
+                "report_number": rep.report_number,
+                "status": "APPROVED",
+                "overall_verdict": True,
+                "sha256_hash": pdf_hash,
+                "approved_by": approver_name,
+                "pdf_storage_path": storage_path
+            },
+            user_id=approver_name
+        )
+
         verification_url = f"https://lims.metrology.gov.in/verify/{report_id}?hash={pdf_hash[:12]}"
         qr_b64 = CryptoAuditService.generate_qr_code_base64(verification_url)
 
@@ -222,6 +237,18 @@ def process_verification_action(report_id: str, payload: VerificationAction):
                 r.overall_verdict = False
                 r.updated_at = now
                 break
+
+        # Record REPORT_REJECTED in integrity ledger
+        IntegrityLedgerService.record_report_lifecycle_event(
+            report_id=report_id,
+            event_type="REPORT_REJECTED",
+            report_data={
+                "report_number": rep.report_number,
+                "status": "REJECTED",
+                "overall_verdict": False,
+                "rejection_reason": payload.remarks
+            }
+        )
 
         return {
             "report_id": report_id,

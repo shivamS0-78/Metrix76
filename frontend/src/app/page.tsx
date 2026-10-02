@@ -28,10 +28,11 @@ import {
   ArrowUpRight,
   Shield,
   Check,
-  Cpu
+  Cpu,
+  Trash2
 } from 'lucide-react';
 import { useAuth } from '@/lib/authContext';
-import { getDashboardData } from '@/lib/api';
+import { getDashboardData, deleteReportDraft } from '@/lib/api';
 import { DashboardData } from '@/types/metrology';
 import { formatDate } from '@/lib/utils';
 
@@ -59,6 +60,40 @@ export default function RootPage() {
         .finally(() => setLoadingDashboard(false));
     }
   }, [user, role]);
+
+  const [deletingDraftId, setDeletingDraftId] = useState<string | null>(null);
+
+  const handleDeleteDraft = async (draftId: string, reportNumber: string) => {
+    if (!confirm(`Are you sure you want to delete draft "${reportNumber}"? This action cannot be undone.`)) {
+      return;
+    }
+    setDeletingDraftId(draftId);
+    try {
+      await deleteReportDraft(draftId);
+      setData((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          technician_work_queue: prev.technician_work_queue.filter((d) => d.id !== draftId),
+          metrics: {
+            ...prev.metrics,
+            active_evaluations_count: Math.max(0, (prev.metrics?.active_evaluations_count || 1) - 1),
+          },
+        };
+      });
+      if (typeof window !== 'undefined') {
+        const active = window.localStorage.getItem('metrix76_active_report_id');
+        if (active === draftId) {
+          window.localStorage.removeItem('metrix76_active_report_id');
+        }
+      }
+    } catch (e: any) {
+      console.error('Failed to delete draft:', e);
+      alert(`Could not delete draft: ${e.message || 'Server error'}`);
+    } finally {
+      setDeletingDraftId(null);
+    }
+  };
 
   const handleQuickVerify = (e: React.FormEvent) => {
     e.preventDefault();
@@ -744,12 +779,27 @@ export default function RootPage() {
                       Updated: {formatDate(item.updated_at)}
                     </span>
                   </div>
-                  <Link
-                    href="/evaluations"
-                    className="text-[11px] font-mono uppercase bg-ink-950 hover:bg-neutral-800 text-white px-3 py-1 font-semibold transition-colors"
-                  >
-                    Resume
-                  </Link>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Link
+                      href={`/evaluations?reportId=${item.id}`}
+                      className="text-[11px] font-mono uppercase bg-ink-950 hover:bg-neutral-800 text-white px-3 py-1 font-semibold transition-colors"
+                    >
+                      {role === 'TECHNICIAN' ? 'Resume Draft' : 'Inspect Draft'}
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteDraft(item.id, item.report_number)}
+                      disabled={deletingDraftId === item.id}
+                      className="text-[11px] font-mono uppercase bg-white hover:bg-rose-50 border border-editorial-border hover:border-rose-300 text-rose-700 p-1 font-semibold transition-colors cursor-pointer"
+                      title={`Delete draft ${item.report_number}`}
+                    >
+                      {deletingDraftId === item.id ? (
+                        <span className="w-3.5 h-3.5 border-2 border-rose-600 border-t-transparent rounded-full animate-spin inline-block" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

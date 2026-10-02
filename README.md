@@ -268,3 +268,236 @@ User authentication is managed strictly via **Supabase Auth** with roles embedde
 - **OIML R 76-1:2006 (E)**: *Non-automatic weighing instruments - Part 1: Metrological and technical requirements - Tests*.
 - **OIML R 76-2:2007 (E)**: *Non-automatic weighing instruments - Part 2: Test report format*.
 - **The Legal Metrology Act, 2009 (India)** & **Legal Metrology (General) Rules, 2011 (Seventh Schedule)**.
+- **ISO/IEC 17025:2017**: *General requirements for the competence of testing and calibration laboratories (Clause 7.11 Control of data and information management)*.
+
+---
+
+## Production Feature 1: Clause-Level Failure Explanation
+
+### Overview & Architecture
+Metrix76 preserves the authoritative `OIMLR76Engine` as the sole deterministic compliance arbiter. The **Clause-Level Failure Explanation** layer consumes the engine's calculation results and generates audit-grade, human-readable explanations answering **why** an observation failed.
+
+```
+Raw Observations
+       ↓
+Existing Validation
+       ↓
+OIMLR76Engine (Authoritative Calculation)
+       ↓
+Authoritative Calculation Result
+       ↓
+FailureExplanationGenerator
+       ↓
+Structured 3-Level Failure Explanation
+```
+
+### 3-Level Explanation Hierarchy
+1. **Level 1 (Test Level)**: Concise executive failure headline (e.g., `Weighing Performance — Non-Compliant Observation #7`).
+2. **Level 2 (Observation Level)**: Clear summary stating applied load, indication, calculated error, statutory limit, and excess beyond tolerance (e.g., `Observation #7 at 20 kg failed: calculated error +0.050 kg exceeds permissible limit ±0.030 kg by 0.020 kg.`).
+3. **Level 3 (Numerical Details & Evidence)**: Full turning point mathematics, corrected error ($E_c = E - E_0$), tolerance margin percentage, linked evidence IDs, and statutory clause citations.
+
+### Failure Codes
+Structured failure codes used by the engine:
+- `ERROR_EXCEEDS_MPE`: Error on weighing turning point exceeds Table 6 MPE.
+- `REPEATABILITY_EXCEEDS_LIMIT`: Variance spread $\Delta I = P_{\max} - P_{\min}$ exceeds permissible repeatability threshold.
+- `ECCENTRICITY_EXCEEDS_LIMIT`: Corner load deviation exceeds allowable corner MPE.
+- `ZERO_ERROR_EXCEEDS_LIMIT`: Zero-setting error exceeds $\pm 0.25e$.
+- `TARE_ERROR_EXCEEDS_LIMIT`: Tare balancing deviation exceeds permissible tolerance.
+- `INVALID_OBSERVATION`: Observation violates physical bounds or digital interval steps.
+- `MISSING_REQUIRED_OBSERVATION`: Required statutory test point omitted from test cycle.
+- `RULE_NOT_CONFIGURED`: Unconfigured test module; explicit notice provided without fabricating clauses.
+- `STANDARD_INVALID`: Associated reference standard weight set is expired or lacks traceable expanded uncertainty ($k=2$).
+
+### Statutory Rule References (No Invented Language)
+The engine binds strictly to configured OIML references:
+- **Weighing Performance**: `OIML R 76-1:2006 Clause A.4.4` (`RULE-OIML-A44-WEIGHING`)
+- **Repeatability**: `OIML R 76-1:2006 Clause A.4.10` (`RULE-OIML-A410-REPEATABILITY`)
+- **Eccentricity**: `OIML R 76-1:2006 Clause A.4.7` (`RULE-OIML-A47-ECCENTRICITY`)
+- **Tare & Zero**: `OIML R 76-1:2006 Clause A.4.2 / A.4.6` (`RULE-OIML-A42-TARE-ZERO`)
+
+*Guardrail Rule*: Where rule metadata is not configured, the system explicitly returns `clause_reference = null` and renders `"Applicable rule reference is not configured."` instead of pretending a reference exists.
+
+---
+
+## Production Feature 2: Cryptographic Raw-Data Ledger & Tamper-Evident Chain
+
+### Goal & Threat Model
+ISO/IEC 17025 Clause 7.11 requires that raw test observations, device acquisitions, documentary evidence, and report lifecycle events maintain an immutable chain of custody. If any record is altered in storage after capture, the system immediately and deterministically detects that the cryptographic history no longer matches.
+
+> **Security Semantics Disclaimer**:
+> This system is **TAMPER-EVIDENT**, not tamper-proof. The integrity ledger is tamper-evident, not an absolute guarantee against a fully privileged database administrator rewriting both data and ledger history. However, any unauthorized database alteration or row manipulation is immediately flagged during chain verification.
+
+### Cryptographic Chaining Formula
+The ledger employs canonical serialization (`M76-C14N-V1`) and SHA-256 hash chaining:
+
+$$\text{payload\_hash} = \text{SHA-256}(\text{canonical}(\text{entity\_data}))$$
+
+$$\text{entry\_hash} = \text{SHA-256}(\text{canonical}(\text{entity\_type}, \text{entity\_id}, \text{event\_type}, \text{sequence\_number}, \text{payload\_hash}, \text{previous\_hash}, \text{created\_at}, \text{canonicalization\_version}))$$
+
+- **Genesis State**: Sequence number `1` has `previous_hash = null`, with the hash formula incorporating the deterministic genesis marker `METRIX76_LEDGER_GENESIS_V1`.
+- **Chain Continuity**: Each subsequent entry strictly requires `entry[i].previous_hash == entry[i-1].entry_hash`.
+- **Concurrency Protection**: Per-report threading locks (`_REPORT_LOCKS`) and monotonic sequence counters prevent race conditions during simultaneous acquisitions.
+
+### Signed Integrity Checkpoint (Ed25519)
+When a report is verified or finalized upon approval, the backend computes a signed checkpoint over the chain head:
+- **Algorithm**: `Ed25519` (RFC 8032).
+- **Private Key**: Held exclusively in backend deployment environment secrets (`METRIX76_CHECKPOINT_PRIVATE_KEY`), never stored in database tables or exposed to clients.
+- **Public Key**: Exposed with the verification payload to enable external third-party mathematical validation of the checkpoint signature.
+
+### Verification States
+The chain verification service evaluates reports across explicit states:
+- `INTACT`: All hashes, sequences, observation payloads, and evidence file bytes match.
+- `TAMPER_DETECTED`: Stored entity content was modified after capture (e.g. observation load or error altered in database).
+- `BROKEN_CHAIN`: Previous hash pointer mismatch indicating ledger record deletion or reordering.
+- `MISSING_ENTRY`: Sequence gap or duplicate sequence number detected.
+- `PAYLOAD_MISMATCH`: Recomputed canonical observation payload hash does not match recorded ledger payload hash.
+- `EVIDENCE_MISMATCH`: Uploaded binary file bytes do not match original SHA-256 digest.
+- `NOT_VERIFIED`: Unverified draft or legacy backfilled report.
+
+### API Endpoints
+- `GET /api/v1/reports/{report_id}/failure-explanations`: Returns 3-level clause failure explanations.
+- `GET /api/v1/reports/{report_id}/integrity`: Fetches current cryptographic verification status and checkpoint.
+- `POST /api/v1/reports/{report_id}/integrity/verify`: Triggers deep cryptographic chain verification across all observations and evidence.
+- `GET /api/v1/reports/{report_id}/integrity/entries`: Retrieves read-only audit ledger entries.
+- `GET /api/v1/reports/{report_id}/integrity/entries/{id}`: Inspects individual entry cryptographic metadata.
+- `POST /api/v1/reports/{report_id}/integrity/simulate-tamper`: Development/test endpoint to demonstrate immediate tamper detection.
+
+---
+
+## Production Feature 3: Automatic OIML Test Plan Generator
+
+### Overview & Architecture
+In statutory legal metrology, a laboratory technician should never have to manually guess which OIML testing procedures apply, what order they should be executed in, or what load points are legally required.
+
+The **Automatic OIML Test Plan Generator** consumes the validated NAWI configuration and generates a structured, ordered, prerequisite-checked statutory test plan that drives the evaluation worksheets directly.
+
+```
+             METRIX76 EVALUATION
+                     │
+                     ▼
+              INSTRUMENT PASSPORT
+                     │
+      ┌──────────────┴──────────────┐
+      │                             │
+  Class/Max/Min                 e / d /
+  configuration                unit/config
+      │                             │
+      └──────────────┬──────────────┘
+                     ▼
+           SERVER-SIDE VALIDATION
+                     │
+                     ▼
+              OIML RULE SET
+                     │
+                     ▼
+         APPLICABILITY ENGINE
+                     │
+                     ▼
+            TEST PLAN GENERATOR
+                     │
+                     ▼
+              PERSISTED PLAN
+                     │
+         ┌───────────┼───────────┐
+         ▼           ▼           ▼
+     WEIGHING    REPEATABILITY  ECCENTRICITY
+         │                       │
+         └───────────┬───────────┘
+                     ▼
+                TARE / ZERO
+                     │
+                     ▼
+           EXISTING WORKSHEETS
+                     │
+                     ▼
+             TEST OBSERVATIONS
+                     │
+                     ▼
+             OIMLR76Engine (Authoritative Calculation)
+                     │
+                     ▼
+             PASS / FAIL RESULT
+                     │
+                     ▼
+            EXISTING REPORT FLOW
+                     │
+                     ▼
+          VERIFICATION / APPROVAL
+                     │
+                     ▼
+                PDF / DOCX / QR
+```
+
+### Supported Tests & OIML Clauses
+The generator deterministically evaluates and sequences the core statutory procedures supported by Metrix76:
+1. **01 WEIGHING (Clause A.4.4)**:
+   - Evaluates weighing performance across increasing and decreasing directions.
+   - Calculates statutory turning-point load steps: $\text{Min}$, $500e$, $2000e$ (MPE step boundaries per Table 6), $50\% \text{Max}$, and $\text{Max}$.
+   - Requires valid standard test weights ($E_2/F_1$ or better).
+2. **02 REPEATABILITY (Clause A.4.10)**:
+   - Evaluates repeatability over 3 series of 10 runs (Loads: $0.5\,\text{Max}$, $1.0\,\text{Max}$, $0.5\,\text{Max}$).
+   - Prerequisite: Requires `01 WEIGHING` to be completed before readiness.
+3. **03 ECCENTRICITY (Clause A.4.7)**:
+   - Evaluates off-center loading on center and 4 quadrant positions (Top-Left, Top-Right, Bottom-Right, Bottom-Left).
+   - Automatically computes statutory corner test load: $1/3\,\text{Max}$ for instruments with $\le 4$ supports.
+4. **04 TARE & ZERO (Clauses A.4.2 & A.4.6)**:
+   - Evaluates zero-setting error, zero-tracking stability, and tare balancing accuracy against the statutory $0.25e$ limit.
+
+*Note on Unconfigured Procedures*: If an auxiliary procedure (such as warm-up drift or tilt) is requested but lacks complete regulatory configuration, the generator marks it `configured = false` and `execution_status = NOT_CONFIGURED`, rendering `"This procedure is not configured for the current rule set."` without inventing regulatory rules.
+
+### Input Parameters & Validation
+The generator strictly validates server-side instrument parameters before generating a plan:
+- `accuracy_class`: `CLASS_I`, `CLASS_II`, `CLASS_III`, `CLASS_IIII`
+- `max_capacity`: Must be $> 0$
+- `min_capacity`: Must be $\ge 0$ and $< \text{Max}$
+- `scale_interval_d`: Must be $> 0$
+- `verification_interval_e`: Must be $> 0$ and $\ge d$
+- `unit`: Valid SI or metric unit (`kg`, `g`, `mg`, `t`)
+- `is_multi_interval` & `multi_interval_spec`: Validates ascending partial ranges ($\text{Max}_1 < \text{Max}_2$) and non-decreasing intervals ($e_1 \le e_2$).
+
+If any parameter is invalid, structured errors are returned (e.g., `{"status": "INVALID", "issues": [{"field": "verification_interval_e", "message": "Verification interval e must be greater than zero."}]}`) and no fake or partial plan is generated.
+
+### Test Plan Lifecycle
+A test plan progresses through explicit, segregated lifecycle states:
+- `INVALID`: Instrument configuration failed statutory sanity checks.
+- `READY`: Applicable tests determined, standards verified, and prerequisites satisfied.
+- `IN_PROGRESS`: Observations are actively being recorded for plan items.
+- `COMPLETED`: All applicable, configured test plan items have their required observations recorded.
+- `STALE`: Instrument parameters were altered after plan generation.
+
+Execution states (`NOT_STARTED`, `BLOCKED`, `READY`, `RUNNING`, `COMPLETED`, `NOT_CONFIGURED`) remain strictly separate from compliance verdicts (`NOT_EVALUATED`, `PASS`, `FAIL`), which are calculated exclusively by the authoritative `OIMLR76Engine`.
+
+### Plan Staleness Detection & Regeneration Diff
+- **Configuration Snapshot**: Every plan stores an immutable snapshot of `accuracy_class`, `max_capacity`, `min_capacity`, `d`, `e`, `unit`, and multi-interval specs.
+- **Staleness Alarm**: If a technician modifies an instrument parameter (e.g. changing $e$ from $2\,\text{g}$ to $5\,\text{g}$), the system immediately marks the plan `STALE` and renders a warning banner.
+- **Structured Diff**: Upon clicking `[REGENERATE TEST PLAN]`, the engine compares old and new configurations and produces a typed `TestPlanDiff` (`added_tests`, `removed_tests`, `modified_tests`, `changed_reasons`).
+- **History Preservation**: The historical plan is linked via `supersedes_plan_id` rather than deleted, preserving auditability under ISO 17025.
+
+### Standards Vault & Prerequisite Integration
+Before a procedure becomes `READY`:
+- **Standards Check**: The system validates that the selected reference standard weight set is active and unexpired. If expired, the affected procedure is set to `execution_status = BLOCKED` with an explicit reason (e.g., `Required reference standard RW-003 is expired.`).
+- **Prerequisites**: Dependent procedures (such as Repeatability requiring prior Weighing completion) display `BLOCKED` until prerequisites are met.
+
+### Driving Worksheets from the Plan
+In the evaluation UI (`/evaluations`):
+1. **Dynamic Tabs**: Worksheet tabs adapt directly to the applicable, configured items in `testPlan.items`.
+2. **Procedure Configuration Ingestion**: Clicking `[USE PLAN LOAD POINTS]` populates the weighing worksheet with the load points computed by the plan.
+3. **Clean Demo Separation**: A separate `[DEMO TEMPLATE]` button provides simulator/demo data for development and demonstration without conflating demo inputs with regulatory requirements.
+4. **Summary Tracking**: Step 5 (Summary) presents the completion progress and execution status of every plan item alongside the authoritative OIMLR76Engine verdict.
+
+### How to Add a Future Test Definition
+To add an additional statutory test procedure in the future:
+1. **Define Test Module** in `app/services/metrology/test_plan/definitions.py`:
+   - Register a `TestDefinition` specifying `test_type`, `standard_reference`, `sequence_order`, `observation_schema`, and default `procedure_config`.
+2. **Add Applicability Rule** in `app/services/metrology/test_plan/rules.py`:
+   - Implement the condition (e.g., based on instrument accuracy class, pan geometry, or multi-interval capabilities).
+3. **Map Procedure Config** in the UI worksheet:
+   - Provide button/handler to populate worksheet observations from the item's `procedure_config`.
+4. **Bind Calculation Engine**:
+   - The authoritative `OIMLR76Engine` evaluates the resulting observations without altering the test plan logic.
+
+### Test Plan API Endpoints
+- `POST /api/v1/reports/{report_id}/test-plan/generate`: Authoritative, deterministic test plan generator.
+- `GET /api/v1/reports/{report_id}/test-plan`: Retrieves the active test plan for a report draft.
+- `POST /api/v1/reports/{report_id}/test-plan/regenerate`: Re-evaluates configuration, produces a structured diff, supersedes the old plan, and persists the new plan.
+

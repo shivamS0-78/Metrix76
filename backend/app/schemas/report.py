@@ -117,3 +117,5 @@ class PublicVerificationResponse(BaseModel):
     approved_at: Optional[datetime]
     sha256_hash: str
     verified_at: datetime
+    integrity_status: Optional[str] = "VERIFIED"
+    chain_root_hash: Optional[str] = None
